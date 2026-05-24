@@ -10,11 +10,15 @@ stitching step consumes to reconstruct the mosaic.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, Protocol
 
+from yosegi import __version__
 from yosegi.models import Tile
+
+_ALLOWED_FORMATS = {"jpg", "jpeg", "png"}
 
 
 class AcquisitionError(RuntimeError):
@@ -74,13 +78,105 @@ def fetch_tiles(
     out_dir: Path,
     rows: int,
     cols: int,
-    overlap: float,
+    step_x: int,
+    step_y: int,
+    autofocus: bool = False,
+    overlap: float | None = None,
+    *,
+    client: Microscope | None = None,
+    image_format: str = "jpg",
 ) -> list[Tile]:
-    """Scan the sample and download overlapping tiles into ``out_dir``.
+    """Raster a grid, capture one tile per cell, and save them to ``out_dir``.
 
-    Returns one :class:`~yosegi.models.Tile` per captured patch.
+    The stage moves ``step_x``/``step_y`` steps between adjacent tiles in a snake
+    pattern. ``overlap`` is recorded in the manifest but does not affect motion.
+    When ``autofocus`` is set, the scope refocuses before each capture. Pass
+    ``client`` to use an already-connected microscope (mainly for testing);
+    otherwise one is opened from ``host`` (or mDNS discovery when ``host`` is
+    ``None``).
+
+    Returns one :class:`~yosegi.models.Tile` per captured patch and writes a
+    ``manifest.json`` alongside the images.
     """
-    raise NotImplementedError(
-        "Acquisition is not implemented yet. This will drive the OpenFlexure scope via "
-        "openflexure-microscope-client to raster an XY grid and save overlapping tiles."
-    )
+    if rows < 1 or cols < 1:
+        raise AcquisitionError("rows and cols must be >= 1")
+    ext = image_format.lower()
+    if ext not in _ALLOWED_FORMATS:
+        raise AcquisitionError(f"image_format must be one of {sorted(_ALLOWED_FORMATS)}, got {image_format!r}")
+
+    scope = client if client is not None else connect(host)
+
+    out_dir = Path(out_dir)
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise AcquisitionError(f"Could not create output directory {out_dir}: {exc}") from exc
+
+    start = dict(scope.position)
+    tiles: list[Tile] = []
+    prev: tuple[int, int] | None = None
+
+    for row, col in snake_cells(rows, cols):
+        if prev is not None:
+            dx = (col - prev[1]) * step_x
+            dy = (row - prev[0]) * step_y
+            if dx or dy:
+                scope.move_rel({"x": dx, "y": dy, "z": 0})
+        if autofocus:
+            scope.autofocus()
+        image = scope.capture_image()
+        path = out_dir / f"tile_r{row:02d}_c{col:02d}.{ext}"
+        image.save(path)
+        pos = dict(scope.position)
+        tiles.append(
+            Tile(
+                path=path,
+                row=row,
+                col=col,
+                stage_x=pos.get("x"),
+                stage_y=pos.get("y"),
+                stage_z=pos.get("z"),
+            )
+        )
+        prev = (row, col)
+
+    scope.move(start, absolute=True)
+    _write_manifest(out_dir, rows, cols, step_x, step_y, overlap, autofocus, start, tiles)
+    return tiles
+
+
+def _write_manifest(
+    out_dir: Path,
+    rows: int,
+    cols: int,
+    step_x: int,
+    step_y: int,
+    overlap: float | None,
+    autofocus: bool,
+    start: dict[str, int],
+    tiles: list[Tile],
+) -> Path:
+    """Write the acquire->stitch handoff manifest to ``out_dir/manifest.json``."""
+    manifest = {
+        "schema": "yosegi.acquire/1",
+        "tool_version": __version__,
+        "grid": {"rows": rows, "cols": cols},
+        "step": {"x": step_x, "y": step_y},
+        "overlap": overlap,
+        "autofocus": autofocus,
+        "start_position": start,
+        "tiles": [
+            {
+                "filename": t.path.name,
+                "row": t.row,
+                "col": t.col,
+                "stage_x": t.stage_x,
+                "stage_y": t.stage_y,
+                "stage_z": t.stage_z,
+            }
+            for t in tiles
+        ],
+    }
+    path = out_dir / "manifest.json"
+    path.write_text(json.dumps(manifest, indent=2))
+    return path
