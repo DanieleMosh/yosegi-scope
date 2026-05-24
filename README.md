@@ -20,7 +20,11 @@ stitching required.
   refined per-tile offsets, then [Pillow](https://python-pillow.org/) composites the
   tiles onto a single canvas. Stitching needs textured tiles with real overlap and a
   grid of at least 2×3; the layout is read from the run's `manifest.json` (or the tile
-  filenames). Seeding the aligner from stage steps is a future enhancement.
+  filenames). Two tuning flags matter on real microscopes (verified on an OpenFlexure
+  scope): `--transpose`, because the OpenFlexure camera's image axes are swapped
+  relative to the stage, and `--ncc-threshold` (default 0.5), which you can lower
+  (~0.2–0.3) for faint or low-contrast samples whose tiles correlate weakly. Seam
+  blending and seeding the aligner from stage steps are future enhancements.
 
 ## Requirements
 
@@ -49,8 +53,11 @@ uv run yosegi acquire --host microscope.local --output ./tiles --autofocus
 # Stitch a folder of tiles into one composite
 uv run yosegi stitch --input ./tiles --output mosaic.jpg
 
+# Stitch tiles from an OpenFlexure scope (axes swapped; faint sample)
+uv run yosegi stitch --input ./tiles --output mosaic.jpg --transpose --ncc-threshold 0.3
+
 # Acquire then stitch in one pass
-uv run yosegi run --host microscope.local --output mosaic.jpg
+uv run yosegi run --host microscope.local --output mosaic.jpg --transpose
 ```
 
 If `--host` is omitted, the microscope is discovered automatically via mDNS.
