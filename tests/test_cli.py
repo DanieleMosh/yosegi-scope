@@ -21,6 +21,13 @@ def test_version() -> None:
     assert __version__ in result.output
 
 
+def test_stitch_help_lists_tuning_options() -> None:
+    result = runner.invoke(app, ["stitch", "--help"])
+    assert result.exit_code == 0
+    assert "--ncc-threshold" in result.output
+    assert "--transpose" in result.output
+
+
 def test_stitch_missing_dir_exits_cleanly(tmp_path) -> None:
     result = runner.invoke(
         app, ["stitch", "--input", str(tmp_path / "nope"), "--output", str(tmp_path / "out.png")]

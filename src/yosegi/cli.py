@@ -86,12 +86,20 @@ def acquire(
 def stitch(
     input: Path = typer.Option(..., "--input", "-i", help="Directory of captured tiles."),
     output: Path = typer.Option(..., "--output", "-o", help="Path for the composite image."),
+    ncc_threshold: float = typer.Option(
+        0.5, "--ncc-threshold", help="m2stitch pair-acceptance cutoff; lower for faint samples."
+    ),
+    transpose: bool = typer.Option(
+        False, "--transpose/--no-transpose", help="Swap row/col axes (use for OpenFlexure cameras)."
+    ),
 ) -> None:
     """Align and merge tiles into a single seamless composite."""
     from yosegi.stitch import StitchError, stitch_tiles
 
     try:
-        result = stitch_tiles(in_dir=input, out_file=output)
+        result = stitch_tiles(
+            in_dir=input, out_file=output, ncc_threshold=ncc_threshold, transpose=transpose
+        )
     except (StitchError, NotImplementedError) as exc:
         _abort(exc)
     typer.echo(f"Wrote {result.width}x{result.height} mosaic from {result.tile_count} tiles to {result.path}")
@@ -109,6 +117,12 @@ def run(
         False, "--autofocus/--no-autofocus", help="Autofocus at each tile before capture."
     ),
     overlap: float = typer.Option(0.2, "--overlap", help="Fractional tile overlap (recorded as metadata only)."),
+    ncc_threshold: float = typer.Option(
+        0.5, "--ncc-threshold", help="m2stitch pair-acceptance cutoff; lower for faint samples."
+    ),
+    transpose: bool = typer.Option(
+        False, "--transpose/--no-transpose", help="Swap row/col axes (use for OpenFlexure cameras)."
+    ),
 ) -> None:
     """Acquire tiles from the microscope, then stitch them into a mosaic."""
     from yosegi.acquire import AcquisitionError, fetch_tiles
@@ -126,7 +140,9 @@ def run(
             autofocus=autofocus,
             overlap=overlap,
         )
-        result = stitch_tiles(in_dir=tile_dir, out_file=output)
+        result = stitch_tiles(
+            in_dir=tile_dir, out_file=output, ncc_threshold=ncc_threshold, transpose=transpose
+        )
     except (AcquisitionError, StitchError, NotImplementedError) as exc:
         _abort(exc)
     typer.echo(f"Wrote {result.width}x{result.height} mosaic from {result.tile_count} tiles to {result.path}")

@@ -83,6 +83,15 @@ def test_stitch_from_manifest(tmp_path: Path) -> None:
     assert Image.open(out).size == (result.width, result.height)
 
 
+def test_stitch_with_lower_ncc_threshold(tmp_path: Path) -> None:
+    # a permissive threshold still stitches the clean synthetic grid
+    _make_grid(tmp_path, rows=2, cols=3)
+    out = tmp_path / "mosaic.png"
+    result = stitch_tiles(in_dir=tmp_path, out_file=out, ncc_threshold=0.3)
+    assert out.exists()
+    assert result.tile_count == 6
+
+
 def test_stitch_from_filename_glob_fallback(tmp_path: Path) -> None:
     _make_grid(tmp_path, rows=2, cols=3, manifest=False)
     assert not (tmp_path / "manifest.json").exists()

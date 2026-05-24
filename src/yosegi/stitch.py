@@ -124,12 +124,16 @@ def _load_tiles(tiles: list[tuple[Path, int, int]]):
     return stack, rgb, rows, cols, tile_w, tile_h
 
 
-def _align(stack, rows: list[int], cols: list[int]):
+def _align(stack, rows: list[int], cols: list[int], ncc_threshold: float = 0.5, transpose: bool = False):
     """Run m2stitch and return parallel ``(x_pos, y_pos)`` pixel arrays.
 
-    ``row_col_transpose=False`` maps ``x_pos`` to the column (horizontal) axis
-    and ``y_pos`` to the row (vertical) axis, matching PIL's paste convention.
-    Any m2stitch failure is normalized into :class:`StitchError`.
+    With ``transpose=False`` (m2stitch's ``row_col_transpose=False``), ``x_pos``
+    maps to the column (horizontal) axis and ``y_pos`` to the row (vertical) axis,
+    matching PIL's paste convention. Some cameras (notably the OpenFlexure scope,
+    whose stage and image axes are swapped) need ``transpose=True`` instead.
+    ``ncc_threshold`` is m2stitch's correlation cutoff for accepting tile pairs;
+    lower it (e.g. 0.3) for faint or low-texture samples. Any m2stitch failure is
+    normalized into :class:`StitchError`.
     """
     import m2stitch
 
@@ -143,11 +147,15 @@ def _align(stack, rows: list[int], cols: list[int]):
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            grid_df, _ = m2stitch.stitch_images(stack, rows=rows, cols=cols, row_col_transpose=False)
+            grid_df, _ = m2stitch.stitch_images(
+                stack, rows=rows, cols=cols, row_col_transpose=transpose, ncc_threshold=ncc_threshold
+            )
     except Exception as exc:  # AssertionError ("no good pair"), ValueError, internal filters, etc.
         raise StitchError(
             f"Could not align tiles ({type(exc).__name__}: {exc}). This usually means too little "
-            f"overlap, too few tiles, or low-texture images. Try a >=2x3 grid with ~30-40% overlap."
+            f"overlap, too few tiles, or low-texture images. Try a >=2x3 grid with ~30-40% overlap, "
+            f"lower --ncc-threshold (currently {ncc_threshold}), or --transpose if the camera axes "
+            f"are swapped (common on OpenFlexure)."
         ) from exc
     return grid_df["x_pos"].to_numpy(), grid_df["y_pos"].to_numpy()
 
@@ -172,12 +180,17 @@ def _composite(rgb_images, x_pos, y_pos, tile_w: int, tile_h: int):
     return canvas, width, height
 
 
-def stitch_tiles(in_dir: Path, out_file: Path) -> MosaicResult:
+def stitch_tiles(
+    in_dir: Path, out_file: Path, ncc_threshold: float = 0.5, transpose: bool = False
+) -> MosaicResult:
     """Align tiles in ``in_dir`` and write the merged mosaic to ``out_file``.
 
     Reads the acquire manifest (or the tile filenames) to recover the grid,
     aligns the tiles with m2stitch, composites them with Pillow, and saves the
-    result. Raises :class:`StitchError` (writing nothing) if the tiles cannot be
+    result. ``ncc_threshold`` is m2stitch's pair-acceptance correlation cutoff;
+    lower it for faint or low-texture samples. Set ``transpose=True`` when the
+    camera's image axes are swapped relative to the stage (common on OpenFlexure).
+    Raises :class:`StitchError` (writing nothing) if the tiles cannot be
     discovered, loaded, or aligned. Returns a :class:`~yosegi.models.MosaicResult`.
     """
     in_dir = Path(in_dir)
@@ -185,7 +198,7 @@ def stitch_tiles(in_dir: Path, out_file: Path) -> MosaicResult:
 
     tiles = _discover_tiles(in_dir)
     stack, rgb, rows, cols, tile_w, tile_h = _load_tiles(tiles)
-    x_pos, y_pos = _align(stack, rows, cols)
+    x_pos, y_pos = _align(stack, rows, cols, ncc_threshold=ncc_threshold, transpose=transpose)
     canvas, width, height = _composite(rgb, x_pos, y_pos, tile_w, tile_h)
 
     try:
