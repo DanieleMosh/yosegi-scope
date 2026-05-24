@@ -18,16 +18,23 @@ import json
 import re
 import warnings
 from pathlib import Path
+from typing import NamedTuple
 
 from yosegi.models import MosaicResult
 
-_ALLOWED_EXTS = (".jpg", ".jpeg", ".png")
 _MANIFEST_SCHEMA = "yosegi.acquire/1"
 # tile_r00_c01.jpg -> row=0, col=1
 _TILE_RE = re.compile(r"^tile_r(\d+)_c(\d+)\.(jpe?g|png)$", re.IGNORECASE)
 
-# One tile: (path, row, col, stage_x | None, stage_y | None)
-Tile = tuple[Path, int, int, "int | None", "int | None"]
+
+class Tile(NamedTuple):
+    """A discovered tile: its file plus grid index and (optional) stage position."""
+
+    path: Path
+    row: int
+    col: int
+    stage_x: int | None
+    stage_y: int | None
 
 
 class StitchError(RuntimeError):
@@ -71,10 +78,10 @@ def _tiles_from_manifest(in_dir: Path, manifest_path: Path) -> tuple[list[Tile],
             raise StitchError(f"Malformed tile entry in manifest: {entry!r} ({exc})") from exc
         if not path.exists():
             raise StitchError(f"Manifest references missing tile file: {path}")
-        tiles.append((path, row, col, entry.get("stage_x"), entry.get("stage_y")))
+        tiles.append(Tile(path, row, col, entry.get("stage_x"), entry.get("stage_y")))
     if not tiles:
         raise StitchError(f"Manifest {manifest_path} lists no tiles")
-    tiles.sort(key=lambda t: (t[1], t[2]))
+    tiles.sort(key=lambda t: (t.row, t.col))
     meta = {
         "steps_per_pixel": manifest.get("steps_per_pixel"),
         "step": manifest.get("step"),
@@ -91,12 +98,12 @@ def _tiles_from_glob(in_dir: Path) -> list[Tile]:
         match = _TILE_RE.match(path.name)
         if not match:
             continue
-        tiles.append((path, int(match.group(1)), int(match.group(2)), None, None))
+        tiles.append(Tile(path, int(match.group(1)), int(match.group(2)), None, None))
     if not tiles:
         raise StitchError(
             f"No tiles found in {in_dir}. Expected a manifest.json or files named like tile_r00_c00.jpg"
         )
-    tiles.sort(key=lambda t: (t[1], t[2]))
+    tiles.sort(key=lambda t: (t.row, t.col))
     return tiles
 
 
@@ -114,22 +121,22 @@ def _load_tiles(tiles: list[Tile]):
     rows: list[int] = []
     cols: list[int] = []
     size: tuple[int, int] | None = None  # (W, H)
-    for path, row, col, _sx, _sy in tiles:
+    for tile in tiles:
         try:
-            img = Image.open(path)
+            img = Image.open(tile.path)
             img.load()
         except (OSError, UnidentifiedImageError) as exc:
-            raise StitchError(f"Could not read tile image {path}: {exc}") from exc
+            raise StitchError(f"Could not read tile image {tile.path}: {exc}") from exc
         if size is None:
             size = img.size
         elif img.size != size:
             raise StitchError(
-                f"Tile {path.name} is {img.size} but expected {size}; all tiles must be the same size."
+                f"Tile {tile.path.name} is {img.size} but expected {size}; all tiles must be the same size."
             )
         rgb.append(img.convert("RGB"))
         gray.append(np.asarray(img.convert("L")))
-        rows.append(row)
-        cols.append(col)
+        rows.append(tile.row)
+        cols.append(tile.col)
 
     stack = np.array(gray)  # (N, H, W); uniform size guaranteed above
     tile_w, tile_h = size  # PIL size is (W, H)
@@ -155,11 +162,11 @@ def _coordinate_positions(tiles: list[Tile], meta: dict, rows: list[int], cols: 
     """
     spp = (meta or {}).get("steps_per_pixel") or {}
     spp_x, spp_y = spp.get("x"), spp.get("y")
-    have_coords = all(t[3] is not None and t[4] is not None for t in tiles)
+    have_coords = all(t.stage_x is not None and t.stage_y is not None for t in tiles)
 
     if spp_x and spp_y and have_coords:
-        x_pos = [_STAGE_SIGN_X * t[3] / spp_x for t in tiles]
-        y_pos = [_STAGE_SIGN_Y * t[4] / spp_y for t in tiles]
+        x_pos = [_STAGE_SIGN_X * t.stage_x / spp_x for t in tiles]
+        y_pos = [_STAGE_SIGN_Y * t.stage_y / spp_y for t in tiles]
         return x_pos, y_pos
 
     # Fallback: regular grid spacing from the requested overlap.
@@ -173,7 +180,7 @@ def _coordinate_positions(tiles: list[Tile], meta: dict, rows: list[int], cols: 
     return x_pos, y_pos
 
 
-def _refine(stack, rows: list[int], cols: list[int], x_pos, y_pos, tile_w: int, tile_h: int,
+def _refine(stack, rows: list[int], cols: list[int], x_pos, y_pos,
             ncc_threshold: float = 0.5, transpose: bool = False):
     """Refine coordinate positions with m2stitch, seeded by the initial guess.
 
@@ -182,8 +189,8 @@ def _refine(stack, rows: list[int], cols: list[int], x_pos, y_pos, tile_w: int, 
     makes on low-texture or repetitive samples. Returns refined ``(x_pos, y_pos)``;
     raises :class:`StitchError` if m2stitch cannot align.
     """
-    import numpy as np
     import m2stitch
+    import numpy as np
 
     n_rows, n_cols = len(set(rows)), len(set(cols))
     if len(rows) < 4 or n_rows < 2 or n_cols < 2:
@@ -191,7 +198,7 @@ def _refine(stack, rows: list[int], cols: list[int], x_pos, y_pos, tile_w: int, 
             f"Refinement needs at least a 2x2 grid (found {n_rows}x{n_cols}, {len(rows)} tiles)."
         )
     # m2stitch initial guess is in (y, x) pixel order per tile.
-    guess = np.array([[float(y), float(x)] for x, y in zip(x_pos, y_pos)])
+    guess = np.array([[float(y), float(x)] for x, y in zip(x_pos, y_pos, strict=True)])
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -222,7 +229,7 @@ def _composite(rgb_images, x_pos, y_pos, tile_w: int, tile_h: int):
     width = max(xs) + tile_w
     height = max(ys) + tile_h
     canvas = Image.new("RGB", (width, height))
-    for img, x, y in zip(rgb_images, xs, ys):
+    for img, x, y in zip(rgb_images, xs, ys, strict=True):
         canvas.paste(img, (x, y))
     return canvas, width, height
 
@@ -253,7 +260,7 @@ def stitch_tiles(
     x_pos, y_pos = _coordinate_positions(tiles, meta, rows, cols, tile_w, tile_h)
     if refine:
         x_pos, y_pos = _refine(
-            stack, rows, cols, x_pos, y_pos, tile_w, tile_h,
+            stack, rows, cols, x_pos, y_pos,
             ncc_threshold=ncc_threshold, transpose=transpose,
         )
 

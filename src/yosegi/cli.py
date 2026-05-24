@@ -10,6 +10,7 @@ Three commands:
 from __future__ import annotations
 
 from pathlib import Path
+from typing import NoReturn
 
 import typer
 
@@ -29,7 +30,7 @@ def _version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
-def _abort(exc: Exception) -> None:
+def _abort(exc: Exception) -> NoReturn:
     """Report a step failure as a clean one-line error instead of a traceback."""
     typer.secho(f"Error: {exc}", fg=typer.colors.RED, err=True)
     raise typer.Exit(code=1)
@@ -61,7 +62,7 @@ def acquire(
     autofocus: bool = typer.Option(
         True, "--autofocus/--no-autofocus", help="Autofocus at each tile before capture."
     ),
-    overlap: float = typer.Option(0.2, "--overlap", help="Fractional tile overlap (recorded as metadata only)."),
+    overlap: float = typer.Option(0.2, "--overlap", help="Fractional tile overlap (metadata only)."),
 ) -> None:
     """Scan a sample and fetch overlapping tiles from the microscope."""
     from yosegi.acquire import AcquisitionError, fetch_tiles
@@ -77,7 +78,7 @@ def acquire(
             autofocus=autofocus,
             overlap=overlap,
         )
-    except (AcquisitionError, NotImplementedError) as exc:
+    except AcquisitionError as exc:
         _abort(exc)
     typer.echo(f"Captured {len(tiles)} tiles to {output}")
 
@@ -104,7 +105,7 @@ def stitch(
             in_dir=input, out_file=output, refine=refine,
             ncc_threshold=ncc_threshold, transpose=transpose,
         )
-    except (StitchError, NotImplementedError) as exc:
+    except StitchError as exc:
         _abort(exc)
     typer.echo(f"Wrote {result.width}x{result.height} mosaic from {result.tile_count} tiles to {result.path}")
 
@@ -120,7 +121,7 @@ def run(
     autofocus: bool = typer.Option(
         True, "--autofocus/--no-autofocus", help="Autofocus at each tile before capture."
     ),
-    overlap: float = typer.Option(0.2, "--overlap", help="Fractional tile overlap (recorded as metadata only)."),
+    overlap: float = typer.Option(0.2, "--overlap", help="Fractional tile overlap (metadata only)."),
     refine: bool = typer.Option(
         False, "--refine/--no-refine", help="Refine coordinate placement with m2stitch correlation."
     ),
@@ -151,7 +152,7 @@ def run(
             in_dir=tile_dir, out_file=output, refine=refine,
             ncc_threshold=ncc_threshold, transpose=transpose,
         )
-    except (AcquisitionError, StitchError, NotImplementedError) as exc:
+    except (AcquisitionError, StitchError) as exc:
         _abort(exc)
     typer.echo(f"Wrote {result.width}x{result.height} mosaic from {result.tile_count} tiles to {result.path}")
 

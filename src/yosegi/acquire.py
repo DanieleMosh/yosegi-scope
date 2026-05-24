@@ -18,8 +18,6 @@ from typing import Any, Protocol
 from yosegi import __version__
 from yosegi.models import Tile
 
-_ALLOWED_FORMATS = {"jpg", "jpeg", "png"}
-
 
 class AcquisitionError(RuntimeError):
     """Raised when acquisition cannot proceed (bad parameters or scope connection)."""
@@ -140,7 +138,6 @@ def fetch_tiles(
     calibrate: bool = True,
     *,
     client: Microscope | None = None,
-    image_format: str = "jpg",
 ) -> list[Tile]:
     """Raster a grid, capture one tile per cell, and save them to ``out_dir``.
 
@@ -159,9 +156,6 @@ def fetch_tiles(
     """
     if rows < 1 or cols < 1:
         raise AcquisitionError("rows and cols must be >= 1")
-    ext = image_format.lower()
-    if ext not in _ALLOWED_FORMATS:
-        raise AcquisitionError(f"image_format must be one of {sorted(_ALLOWED_FORMATS)}, got {image_format!r}")
 
     scope = client if client is not None else connect(host)
 
@@ -186,7 +180,7 @@ def fetch_tiles(
         if autofocus:
             scope.autofocus()
         image = scope.capture_image()
-        path = out_dir / f"tile_r{row:02d}_c{col:02d}.{ext}"
+        path = out_dir / f"tile_r{row:02d}_c{col:02d}.jpg"
         image.save(path)
         pos = dict(scope.position)
         tiles.append(

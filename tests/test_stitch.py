@@ -20,7 +20,7 @@ def _textured_source(h: int, w: int, seed: int = 1234) -> Image.Image:
     brightness = rng.integers(120, 256, n)
     radii = rng.integers(2, 6, n)
     yy, xx = np.mgrid[0:h, 0:w]
-    for y, x, b, rd in zip(ys, xs, brightness, radii):
+    for y, x, b, rd in zip(ys, xs, brightness, radii, strict=True):
         mask = (yy - y) ** 2 + (xx - x) ** 2 <= rd * rd
         img[mask] = np.maximum(img[mask], b)
     return Image.fromarray(img.astype(np.uint8)).convert("RGB")

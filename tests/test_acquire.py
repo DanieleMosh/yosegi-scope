@@ -131,7 +131,7 @@ class WindowFakeMicroscope:
         self.base = np.zeros((2000, 2600), np.uint8)
         ys = rng.integers(0, 2000, 9000)
         xs = rng.integers(0, 2600, 9000)
-        for y, x in zip(ys, xs):
+        for y, x in zip(ys, xs, strict=True):
             self.base[max(0, y - 2) : y + 2, max(0, x - 2) : x + 2] = rng.integers(120, 255)
         self._pos = {"x": 2000, "y": 2000, "z": 0}
 
