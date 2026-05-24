@@ -31,3 +31,18 @@ dev = [
     "pytest>=9.0.3",
     "ruff>=0.15.14",
 ]
+
+[tool.ruff]
+line-length = 110
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# pycodestyle, pyflakes, isort, pyupgrade, flake8-bugbear
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# Typer's idiomatic Option(...) defaults trip B008 (call in argument default).
+"src/yosegi/cli.py" = ["B008"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

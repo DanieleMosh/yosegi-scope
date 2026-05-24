@@ -10,6 +10,7 @@ Three commands:
 from __future__ import annotations
 
 from pathlib import Path
+from typing import NoReturn
 
 import typer
 
@@ -29,7 +30,7 @@ def _version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
-def _abort(exc: Exception) -> None:
+def _abort(exc: Exception) -> NoReturn:
     """Report a step failure as a clean one-line error instead of a traceback."""
     typer.secho(f"Error: {exc}", fg=typer.colors.RED, err=True)
     raise typer.Exit(code=1)
@@ -59,9 +60,9 @@ def acquire(
     step_x: int = typer.Option(2000, "--step-x", help="Stage steps to move in X between tiles."),
     step_y: int = typer.Option(2000, "--step-y", help="Stage steps to move in Y between tiles."),
     autofocus: bool = typer.Option(
-        False, "--autofocus/--no-autofocus", help="Autofocus at each tile before capture."
+        True, "--autofocus/--no-autofocus", help="Autofocus at each tile before capture."
     ),
-    overlap: float = typer.Option(0.2, "--overlap", help="Fractional tile overlap (recorded as metadata only)."),
+    overlap: float = typer.Option(0.2, "--overlap", help="Fractional tile overlap (metadata only)."),
 ) -> None:
     """Scan a sample and fetch overlapping tiles from the microscope."""
     from yosegi.acquire import AcquisitionError, fetch_tiles
@@ -77,7 +78,7 @@ def acquire(
             autofocus=autofocus,
             overlap=overlap,
         )
-    except (AcquisitionError, NotImplementedError) as exc:
+    except AcquisitionError as exc:
         _abort(exc)
     typer.echo(f"Captured {len(tiles)} tiles to {output}")
 
@@ -86,13 +87,25 @@ def acquire(
 def stitch(
     input: Path = typer.Option(..., "--input", "-i", help="Directory of captured tiles."),
     output: Path = typer.Option(..., "--output", "-o", help="Path for the composite image."),
+    refine: bool = typer.Option(
+        False, "--refine/--no-refine", help="Refine coordinate placement with m2stitch correlation."
+    ),
+    ncc_threshold: float = typer.Option(
+        0.5, "--ncc-threshold", help="Refinement pair-acceptance cutoff; lower for faint samples."
+    ),
+    transpose: bool = typer.Option(
+        False, "--transpose/--no-transpose", help="Swap row/col axes during refinement (OpenFlexure)."
+    ),
 ) -> None:
-    """Align and merge tiles into a single seamless composite."""
-    from yosegi.stitch import stitch_tiles
+    """Merge tiles into a composite (by stage coordinates; --refine to correlate)."""
+    from yosegi.stitch import StitchError, stitch_tiles
 
     try:
-        result = stitch_tiles(in_dir=input, out_file=output)
-    except NotImplementedError as exc:
+        result = stitch_tiles(
+            in_dir=input, out_file=output, refine=refine,
+            ncc_threshold=ncc_threshold, transpose=transpose,
+        )
+    except StitchError as exc:
         _abort(exc)
     typer.echo(f"Wrote {result.width}x{result.height} mosaic from {result.tile_count} tiles to {result.path}")
 
@@ -106,13 +119,22 @@ def run(
     step_x: int = typer.Option(2000, "--step-x", help="Stage steps to move in X between tiles."),
     step_y: int = typer.Option(2000, "--step-y", help="Stage steps to move in Y between tiles."),
     autofocus: bool = typer.Option(
-        False, "--autofocus/--no-autofocus", help="Autofocus at each tile before capture."
+        True, "--autofocus/--no-autofocus", help="Autofocus at each tile before capture."
     ),
-    overlap: float = typer.Option(0.2, "--overlap", help="Fractional tile overlap (recorded as metadata only)."),
+    overlap: float = typer.Option(0.2, "--overlap", help="Fractional tile overlap (metadata only)."),
+    refine: bool = typer.Option(
+        False, "--refine/--no-refine", help="Refine coordinate placement with m2stitch correlation."
+    ),
+    ncc_threshold: float = typer.Option(
+        0.5, "--ncc-threshold", help="Refinement pair-acceptance cutoff; lower for faint samples."
+    ),
+    transpose: bool = typer.Option(
+        False, "--transpose/--no-transpose", help="Swap row/col axes during refinement (OpenFlexure)."
+    ),
 ) -> None:
     """Acquire tiles from the microscope, then stitch them into a mosaic."""
     from yosegi.acquire import AcquisitionError, fetch_tiles
-    from yosegi.stitch import stitch_tiles
+    from yosegi.stitch import StitchError, stitch_tiles
 
     tile_dir = output.parent / f"{output.stem}_tiles"
     try:
@@ -126,8 +148,11 @@ def run(
             autofocus=autofocus,
             overlap=overlap,
         )
-        result = stitch_tiles(in_dir=tile_dir, out_file=output)
-    except (AcquisitionError, NotImplementedError) as exc:
+        result = stitch_tiles(
+            in_dir=tile_dir, out_file=output, refine=refine,
+            ncc_threshold=ncc_threshold, transpose=transpose,
+        )
+    except (AcquisitionError, StitchError) as exc:
         _abort(exc)
     typer.echo(f"Wrote {result.width}x{result.height} mosaic from {result.tile_count} tiles to {result.path}")
 
