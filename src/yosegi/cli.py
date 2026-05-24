@@ -29,6 +29,12 @@ def _version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
+def _abort_if_unimplemented(exc: NotImplementedError) -> None:
+    """Report a stubbed step as a clean error instead of a traceback."""
+    typer.secho(f"Error: {exc}", fg=typer.colors.RED, err=True)
+    raise typer.Exit(code=1)
+
+
 @app.callback()
 def main(
     _version: bool = typer.Option(
@@ -55,7 +61,10 @@ def acquire(
     """Scan a sample and fetch overlapping tiles from the microscope."""
     from yosegi.acquire import fetch_tiles
 
-    tiles = fetch_tiles(host=host, out_dir=output, rows=rows, cols=cols, overlap=overlap)
+    try:
+        tiles = fetch_tiles(host=host, out_dir=output, rows=rows, cols=cols, overlap=overlap)
+    except NotImplementedError as exc:
+        _abort_if_unimplemented(exc)
     typer.echo(f"Captured {len(tiles)} tiles to {output}")
 
 
@@ -67,7 +76,10 @@ def stitch(
     """Align and merge tiles into a single seamless composite."""
     from yosegi.stitch import stitch_tiles
 
-    result = stitch_tiles(in_dir=input, out_file=output)
+    try:
+        result = stitch_tiles(in_dir=input, out_file=output)
+    except NotImplementedError as exc:
+        _abort_if_unimplemented(exc)
     typer.echo(f"Wrote {result.width}x{result.height} mosaic from {result.tile_count} tiles to {result.path}")
 
 
@@ -84,8 +96,11 @@ def run(
     from yosegi.stitch import stitch_tiles
 
     tile_dir = output.parent / f"{output.stem}_tiles"
-    fetch_tiles(host=host, out_dir=tile_dir, rows=rows, cols=cols, overlap=overlap)
-    result = stitch_tiles(in_dir=tile_dir, out_file=output)
+    try:
+        fetch_tiles(host=host, out_dir=tile_dir, rows=rows, cols=cols, overlap=overlap)
+        result = stitch_tiles(in_dir=tile_dir, out_file=output)
+    except NotImplementedError as exc:
+        _abort_if_unimplemented(exc)
     typer.echo(f"Wrote {result.width}x{result.height} mosaic from {result.tile_count} tiles to {result.path}")
 
 
