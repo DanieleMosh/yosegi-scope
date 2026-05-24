@@ -1,0 +1,21 @@
+[project]
+name = "yosegi-scope"
+version = "0.1.0"
+description = "Assemble OpenFlexure microscopy mosaics by fetching, aligning, and stitching overlapping tiles."
+readme = "README.md"
+authors = [
+    { name = "Mos Daniele", email = "dany.mosh@yahoo.com" }
+]
+license = { text = "GPL-3.0-or-later" }
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+yosegi = "yosegi.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/yosegi"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
