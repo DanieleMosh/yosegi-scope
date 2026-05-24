@@ -136,12 +136,20 @@ def _load_tiles(tiles: list[Tile]):
     return stack, rgb, rows, cols, tile_w, tile_h
 
 
+# OpenFlexure camera axes are inverted relative to the stage: increasing stage X
+# moves the image content left, increasing stage Y moves it up. Negating both axes
+# when converting stage coordinates to pixels gives the correct mosaic orientation.
+_STAGE_SIGN_X = -1
+_STAGE_SIGN_Y = -1
+
+
 def _coordinate_positions(tiles: list[Tile], meta: dict, rows: list[int], cols: list[int],
                           tile_w: int, tile_h: int):
     """Compute per-tile pixel ``(x_pos, y_pos)`` from stage coordinates.
 
     Uses the manifest's ``steps_per_pixel`` to convert each tile's stage_x/stage_y
-    to pixels. Falls back to a regular grid from ``overlap`` (then a default 20%
+    to pixels, applying the OpenFlexure axis orientation so the mosaic is not
+    mirrored. Falls back to a regular grid from ``overlap`` (then a default 20%
     overlap) when calibration or stage coordinates are unavailable. Always
     succeeds, so this is the robust default placement.
     """
@@ -150,8 +158,8 @@ def _coordinate_positions(tiles: list[Tile], meta: dict, rows: list[int], cols: 
     have_coords = all(t[3] is not None and t[4] is not None for t in tiles)
 
     if spp_x and spp_y and have_coords:
-        x_pos = [t[3] / spp_x for t in tiles]
-        y_pos = [t[4] / spp_y for t in tiles]
+        x_pos = [_STAGE_SIGN_X * t[3] / spp_x for t in tiles]
+        y_pos = [_STAGE_SIGN_Y * t[4] / spp_y for t in tiles]
         return x_pos, y_pos
 
     # Fallback: regular grid spacing from the requested overlap.
@@ -160,8 +168,8 @@ def _coordinate_positions(tiles: list[Tile], meta: dict, rows: list[int], cols: 
         overlap = 0.2
     step_px_x = tile_w * (1 - overlap)
     step_px_y = tile_h * (1 - overlap)
-    x_pos = [c * step_px_x for c in cols]
-    y_pos = [r * step_px_y for r in rows]
+    x_pos = [_STAGE_SIGN_X * c * step_px_x for c in cols]
+    y_pos = [_STAGE_SIGN_Y * r * step_px_y for r in rows]
     return x_pos, y_pos
 
 
@@ -229,8 +237,9 @@ def stitch_tiles(
     """Place tiles in ``in_dir`` and write the merged mosaic to ``out_file``.
 
     By default tiles are placed from their recorded stage coordinates (robust,
-    always coherent). With ``refine=True`` the placement is improved by m2stitch,
-    seeded with those coordinates; if refinement fails the call raises
+    always coherent), using the OpenFlexure axis orientation so the mosaic comes
+    out the right way round. With ``refine=True`` the placement is improved by
+    m2stitch, seeded with those coordinates; if refinement fails the call raises
     :class:`StitchError`. ``ncc_threshold`` and ``transpose`` only affect
     refinement. Raises :class:`StitchError` (writing nothing) if tiles cannot be
     discovered or loaded. Returns a :class:`~yosegi.models.MosaicResult`.

@@ -59,7 +59,7 @@ def acquire(
     step_x: int = typer.Option(2000, "--step-x", help="Stage steps to move in X between tiles."),
     step_y: int = typer.Option(2000, "--step-y", help="Stage steps to move in Y between tiles."),
     autofocus: bool = typer.Option(
-        False, "--autofocus/--no-autofocus", help="Autofocus at each tile before capture."
+        True, "--autofocus/--no-autofocus", help="Autofocus at each tile before capture."
     ),
     overlap: float = typer.Option(0.2, "--overlap", help="Fractional tile overlap (recorded as metadata only)."),
 ) -> None:
@@ -118,7 +118,7 @@ def run(
     step_x: int = typer.Option(2000, "--step-x", help="Stage steps to move in X between tiles."),
     step_y: int = typer.Option(2000, "--step-y", help="Stage steps to move in Y between tiles."),
     autofocus: bool = typer.Option(
-        False, "--autofocus/--no-autofocus", help="Autofocus at each tile before capture."
+        True, "--autofocus/--no-autofocus", help="Autofocus at each tile before capture."
     ),
     overlap: float = typer.Option(0.2, "--overlap", help="Fractional tile overlap (recorded as metadata only)."),
     refine: bool = typer.Option(

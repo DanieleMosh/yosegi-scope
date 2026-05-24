@@ -55,10 +55,13 @@ def _make_grid(
             name = f"tile_r{r:02d}_c{c:02d}.png"
             src.crop(box).save(d / name)
             if steps_per_pixel is not None:
-                sx = int(round(c * step * steps_per_pixel))
-                sy = int(round(r * step * steps_per_pixel))
+                # OpenFlexure axes are inverted: stage decreases as the image
+                # content (column/row) increases, so the stitcher's negation
+                # restores the true tile_r{r}_c{c} layout.
+                sx = -int(round(c * step * steps_per_pixel))
+                sy = -int(round(r * step * steps_per_pixel))
             else:
-                sx, sy = c * 100, r * 100
+                sx, sy = -c * 100, -r * 100
             entries.append(
                 {"filename": name, "row": r, "col": c, "stage_x": sx, "stage_y": sy, "stage_z": 0}
             )
