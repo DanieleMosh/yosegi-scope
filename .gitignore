@@ -17,5 +17,8 @@ dist/
 # OS
 .DS_Store
 
+# Claude Code local state
+.claude/
+
 # Local mosaic outputs (not committed)
 results/
