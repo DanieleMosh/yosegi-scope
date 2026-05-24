@@ -8,8 +8,8 @@ As the scope scans a sample it produces a series of overlapping image patches.
 aligns them, and merges them into a single seamless composite — no manual
 stitching required.
 
-> **Status:** boilerplate. The CLI surface is in place; acquisition and stitching
-> are documented stubs awaiting implementation (see the roadmap below).
+> **Status:** acquisition works (rasters a grid and saves tiles + manifest);
+> stitching is still a documented stub awaiting implementation (see the roadmap).
 
 ## How it works
 
@@ -37,8 +37,12 @@ uv sync
 # Show all commands
 uv run yosegi --help
 
-# Scan a sample and save overlapping tiles
-uv run yosegi acquire --host microscope.local --output ./tiles --rows 3 --cols 3 --overlap 0.2
+# Scan a 3x3 grid and save overlapping tiles (2000 stage steps between tiles)
+uv run yosegi acquire --host microscope.local --output ./tiles \
+    --rows 3 --cols 3 --step-x 2000 --step-y 2000
+
+# Autofocus before every tile
+uv run yosegi acquire --host microscope.local --output ./tiles --autofocus
 
 # Stitch a folder of tiles into one composite
 uv run yosegi stitch --input ./tiles --output mosaic.jpg
@@ -49,6 +53,13 @@ uv run yosegi run --host microscope.local --output mosaic.jpg
 
 If `--host` is omitted, the microscope is discovered automatically via mDNS.
 
+The stage moves `--step-x`/`--step-y` **stage steps** between adjacent tiles, in a
+snake pattern, and returns to the start when done. The right step size depends on
+your objective and sample — pick a value that leaves the desired overlap between
+neighbouring tiles. `--overlap` is recorded in the run's `manifest.json` as metadata
+for the stitcher; it does not affect stage motion. Each run writes `manifest.json`
+alongside the tiles, capturing the grid and per-tile stage positions.
+
 ## Development
 
 ```bash
@@ -58,7 +69,7 @@ uv run ruff check    # lint
 
 ## Roadmap
 
-- [ ] Implement the acquisition raster (XY grid, autofocus, capture) in `acquire.py`.
+- [x] Implement the acquisition raster (XY grid, autofocus, capture) in `acquire.py`.
 - [ ] Implement m2stitch alignment + Pillow compositing in `stitch.py`.
 - [ ] Seam blending and exposure/flat-field correction.
 - [ ] Config file and richer error handling.

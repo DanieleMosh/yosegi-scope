@@ -29,8 +29,8 @@ def _version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
-def _abort_if_unimplemented(exc: NotImplementedError) -> None:
-    """Report a stubbed step as a clean error instead of a traceback."""
+def _abort(exc: Exception) -> None:
+    """Report a step failure as a clean one-line error instead of a traceback."""
     typer.secho(f"Error: {exc}", fg=typer.colors.RED, err=True)
     raise typer.Exit(code=1)
 
@@ -54,17 +54,31 @@ def acquire(
     host: str | None = typer.Option(
         None, "--host", help="Microscope hostname or IP. Omitted = mDNS auto-discovery."
     ),
-    rows: int = typer.Option(3, "--rows", help="Number of grid rows to scan."),
-    cols: int = typer.Option(3, "--cols", help="Number of grid columns to scan."),
-    overlap: float = typer.Option(0.2, "--overlap", help="Fractional tile overlap (0-1)."),
+    rows: int = typer.Option(3, "--rows", min=1, help="Number of grid rows to scan."),
+    cols: int = typer.Option(3, "--cols", min=1, help="Number of grid columns to scan."),
+    step_x: int = typer.Option(2000, "--step-x", help="Stage steps to move in X between tiles."),
+    step_y: int = typer.Option(2000, "--step-y", help="Stage steps to move in Y between tiles."),
+    autofocus: bool = typer.Option(
+        False, "--autofocus/--no-autofocus", help="Autofocus at each tile before capture."
+    ),
+    overlap: float = typer.Option(0.2, "--overlap", help="Fractional tile overlap (recorded as metadata only)."),
 ) -> None:
     """Scan a sample and fetch overlapping tiles from the microscope."""
-    from yosegi.acquire import fetch_tiles
+    from yosegi.acquire import AcquisitionError, fetch_tiles
 
     try:
-        tiles = fetch_tiles(host=host, out_dir=output, rows=rows, cols=cols, overlap=overlap)
-    except NotImplementedError as exc:
-        _abort_if_unimplemented(exc)
+        tiles = fetch_tiles(
+            host=host,
+            out_dir=output,
+            rows=rows,
+            cols=cols,
+            step_x=step_x,
+            step_y=step_y,
+            autofocus=autofocus,
+            overlap=overlap,
+        )
+    except (AcquisitionError, NotImplementedError) as exc:
+        _abort(exc)
     typer.echo(f"Captured {len(tiles)} tiles to {output}")
 
 
@@ -79,7 +93,7 @@ def stitch(
     try:
         result = stitch_tiles(in_dir=input, out_file=output)
     except NotImplementedError as exc:
-        _abort_if_unimplemented(exc)
+        _abort(exc)
     typer.echo(f"Wrote {result.width}x{result.height} mosaic from {result.tile_count} tiles to {result.path}")
 
 
@@ -87,20 +101,34 @@ def stitch(
 def run(
     output: Path = typer.Option(..., "--output", "-o", help="Path for the composite image."),
     host: str | None = typer.Option(None, "--host", help="Microscope hostname or IP."),
-    rows: int = typer.Option(3, "--rows", help="Number of grid rows to scan."),
-    cols: int = typer.Option(3, "--cols", help="Number of grid columns to scan."),
-    overlap: float = typer.Option(0.2, "--overlap", help="Fractional tile overlap (0-1)."),
+    rows: int = typer.Option(3, "--rows", min=1, help="Number of grid rows to scan."),
+    cols: int = typer.Option(3, "--cols", min=1, help="Number of grid columns to scan."),
+    step_x: int = typer.Option(2000, "--step-x", help="Stage steps to move in X between tiles."),
+    step_y: int = typer.Option(2000, "--step-y", help="Stage steps to move in Y between tiles."),
+    autofocus: bool = typer.Option(
+        False, "--autofocus/--no-autofocus", help="Autofocus at each tile before capture."
+    ),
+    overlap: float = typer.Option(0.2, "--overlap", help="Fractional tile overlap (recorded as metadata only)."),
 ) -> None:
     """Acquire tiles from the microscope, then stitch them into a mosaic."""
-    from yosegi.acquire import fetch_tiles
+    from yosegi.acquire import AcquisitionError, fetch_tiles
     from yosegi.stitch import stitch_tiles
 
     tile_dir = output.parent / f"{output.stem}_tiles"
     try:
-        fetch_tiles(host=host, out_dir=tile_dir, rows=rows, cols=cols, overlap=overlap)
+        fetch_tiles(
+            host=host,
+            out_dir=tile_dir,
+            rows=rows,
+            cols=cols,
+            step_x=step_x,
+            step_y=step_y,
+            autofocus=autofocus,
+            overlap=overlap,
+        )
         result = stitch_tiles(in_dir=tile_dir, out_file=output)
-    except NotImplementedError as exc:
-        _abort_if_unimplemented(exc)
+    except (AcquisitionError, NotImplementedError) as exc:
+        _abort(exc)
     typer.echo(f"Wrote {result.width}x{result.height} mosaic from {result.tile_count} tiles to {result.path}")
 
 
