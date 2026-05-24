@@ -21,10 +21,12 @@ def test_version() -> None:
     assert __version__ in result.output
 
 
-def test_stitch_stub_exits_cleanly() -> None:
-    result = runner.invoke(app, ["stitch", "--input", "x", "--output", "y"])
+def test_stitch_missing_dir_exits_cleanly(tmp_path) -> None:
+    result = runner.invoke(
+        app, ["stitch", "--input", str(tmp_path / "nope"), "--output", str(tmp_path / "out.png")]
+    )
     assert result.exit_code == 1
-    assert "not implemented" in result.output.lower()
+    assert "error" in result.output.lower()
 
 
 def test_acquire_rejects_invalid_grid() -> None:

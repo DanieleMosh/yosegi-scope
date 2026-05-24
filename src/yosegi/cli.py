@@ -88,11 +88,11 @@ def stitch(
     output: Path = typer.Option(..., "--output", "-o", help="Path for the composite image."),
 ) -> None:
     """Align and merge tiles into a single seamless composite."""
-    from yosegi.stitch import stitch_tiles
+    from yosegi.stitch import StitchError, stitch_tiles
 
     try:
         result = stitch_tiles(in_dir=input, out_file=output)
-    except NotImplementedError as exc:
+    except (StitchError, NotImplementedError) as exc:
         _abort(exc)
     typer.echo(f"Wrote {result.width}x{result.height} mosaic from {result.tile_count} tiles to {result.path}")
 
@@ -112,7 +112,7 @@ def run(
 ) -> None:
     """Acquire tiles from the microscope, then stitch them into a mosaic."""
     from yosegi.acquire import AcquisitionError, fetch_tiles
-    from yosegi.stitch import stitch_tiles
+    from yosegi.stitch import StitchError, stitch_tiles
 
     tile_dir = output.parent / f"{output.stem}_tiles"
     try:
@@ -127,7 +127,7 @@ def run(
             overlap=overlap,
         )
         result = stitch_tiles(in_dir=tile_dir, out_file=output)
-    except (AcquisitionError, NotImplementedError) as exc:
+    except (AcquisitionError, StitchError, NotImplementedError) as exc:
         _abort(exc)
     typer.echo(f"Wrote {result.width}x{result.height} mosaic from {result.tile_count} tiles to {result.path}")
 
