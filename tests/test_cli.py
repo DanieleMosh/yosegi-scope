@@ -36,7 +36,7 @@ def test_stitch_exposes_tuning_options() -> None:
     # inspect the declared option flags directly, independent of help rendering
     stitch_cmd = typer.main.get_command(app).commands["stitch"]
     flags = {opt for param in stitch_cmd.params for opt in param.opts}
-    assert {"--refine", "--ncc-threshold", "--transpose"} <= flags
+    assert {"--correlate", "--high-pass-sigma", "--minimum-overlap"} <= flags
 
 
 def test_stitch_missing_dir_exits_cleanly(tmp_path) -> None:
