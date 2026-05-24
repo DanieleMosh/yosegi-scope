@@ -14,12 +14,17 @@ normalized into :class:`StitchError`.
 from __future__ import annotations
 
 import json
+import re
 import shutil
+import time
 from pathlib import Path
 
 from yosegi.models import MosaicResult
 
 _MANIFEST_SCHEMA = "yosegi.acquire/1"
+# Tile files written by acquire, e.g. tile_r00_c01.jpg. Used to count input tiles
+# without picking up the diagnostic PNGs openflexure-stitching drops in the folder.
+_TILE_RE = re.compile(r"^tile_r\d+_c\d+\.(jpe?g|png)$", re.IGNORECASE)
 
 
 class StitchError(RuntimeError):
@@ -88,6 +93,7 @@ def stitch_tiles(
         stitching_mode="all" if correlate else "stage_stitch",
     )
 
+    started_at = time.time()
     try:
         load_tile_and_stitch(
             str(in_dir),
@@ -101,7 +107,7 @@ def stitch_tiles(
             f"carry stage positions in EXIF and overlap enough; try --high-pass-sigma."
         ) from exc
 
-    produced = _find_stitched_image(out_dir)
+    produced = _find_stitched_image(out_dir, since=started_at)
     if produced is None:
         raise StitchError(f"Stitching produced no output image in {out_dir}")
     if produced != out_file:
@@ -111,18 +117,23 @@ def stitch_tiles(
 
     with Image.open(out_file) as img:
         width, height = img.size
-    tile_count = sum(1 for p in in_dir.iterdir() if p.suffix.lower() in {".jpg", ".jpeg", ".png"})
+    tile_count = sum(1 for p in in_dir.iterdir() if _TILE_RE.match(p.name))
     return MosaicResult(path=out_file, width=width, height=height, tile_count=tile_count)
 
 
-def _find_stitched_image(out_dir: Path) -> Path | None:
-    """Return the library's full stitched image, if written.
+def _find_stitched_image(out_dir: Path, since: float) -> Path | None:
+    """Return the full stitched image the current run wrote, if any.
 
     Correlated stitching writes ``{prefix}_stitched.jpg``; stage-only stitching
-    writes ``stitched_from_stage.jpg``.
+    writes ``stitched_from_stage.jpg``. Only files modified at or after ``since``
+    are considered, so a stale image from a previous run is never picked up; the
+    most recently modified match wins.
     """
-    stage = out_dir / "stitched_from_stage.jpg"
-    if stage.exists():
-        return stage
-    candidates = sorted(out_dir.glob("*_stitched.jpg"))
-    return candidates[0] if candidates else None
+    candidates = [
+        p
+        for p in [out_dir / "stitched_from_stage.jpg", *out_dir.glob("*_stitched.jpg")]
+        if p.exists() and p.stat().st_mtime >= since
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: p.stat().st_mtime)

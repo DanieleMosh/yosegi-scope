@@ -46,6 +46,9 @@ def _make_grid(d: Path, rows: int, cols: int, tile: int = 320, step: int = 200) 
 def test_stage_stitch_writes_mosaic(tmp_path: Path) -> None:
     tiles_dir = tmp_path / "tiles"
     _make_grid(tiles_dir, rows=2, cols=2)
+    # a diagnostic PNG like openflexure-stitching drops in the folder must not be
+    # counted as a tile (regression for the tile_count over-count bug)
+    Image.new("RGB", (10, 10)).save(tiles_dir / "stitching_inputs.png")
     out = tmp_path / "mosaic.jpg"
     result = stitch_tiles(in_dir=tiles_dir, out_file=out, correlate=False)
     assert out.exists()
@@ -57,3 +60,22 @@ def test_stage_stitch_writes_mosaic(tmp_path: Path) -> None:
 def test_missing_input_dir_raises(tmp_path: Path) -> None:
     with pytest.raises(StitchError):
         stitch_tiles(in_dir=tmp_path / "nope", out_file=tmp_path / "m.jpg")
+
+
+def test_find_stitched_image_ignores_stale_output(tmp_path: Path) -> None:
+    import os
+
+    from yosegi.stitch import _find_stitched_image
+
+    # a stitched image from a previous run, with an mtime well before this run
+    stale = tmp_path / "old_stitched.jpg"
+    stale.write_bytes(b"old")
+    os.utime(stale, (1000, 1000))
+    started_at = 2000.0
+    # nothing new since started_at -> the stale file must not be picked up
+    assert _find_stitched_image(tmp_path, since=started_at) is None
+    # a fresh output (mtime after started_at) is found
+    fresh = tmp_path / "new_stitched.jpg"
+    fresh.write_bytes(b"new")
+    os.utime(fresh, (3000, 3000))
+    assert _find_stitched_image(tmp_path, since=started_at) == fresh
