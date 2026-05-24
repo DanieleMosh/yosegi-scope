@@ -5,9 +5,15 @@ Guidance for working in this repository.
 ## Goal
 
 `yosegi-scope` automates assembly of microscopy mosaics from the
-[OpenFlexure microscope](https://openflexure.org/). It scans a sample over an XY
-grid, fetching overlapping image tiles from the scope over the local network,
-then aligns and merges them into one seamless composite — no manual stitching.
+[OpenFlexure microscope](https://openflexure.org/). Today it scans a sample over an
+XY grid, fetching overlapping image tiles over the local network, then aligns and
+merges them into one seamless composite — no manual stitching.
+
+The intended trajectory (see [Direction](#direction)) is a self-driving
+digital-pathology pipeline: image **post-processing** for cleaner scans → automatic
+**whole-slide survey** (detect the sample boundary, no user-defined grid) →
+**brightfield→fluorescence** deep-learning translation → a **Pydantic/FastAPI**
+service → a web **front end**.
 
 ## Tech stack
 
@@ -117,3 +123,24 @@ which is how tests run without hardware.
   `AcquisitionError` / `StitchError`, validate before side effects.
 - Tests must not require a microscope — fake the `Microscope` Protocol. Stitch
   tests that need libvips are skipped when `openflexure_stitching` can't import.
+
+## Direction
+
+Where the project is headed (each is a separate future effort, not yet built):
+
+1. **Post-processing** *(next)* — flat-field/illumination correction, seam exposure
+   blending, white-balance/contrast normalisation, optional denoising. Likely a new
+   `postprocess.py` step applied to (or within) the stitch output.
+2. **Automatic whole-slide survey** — detect the **sample boundary** (low-mag
+   overview + thresholding/segmentation: tissue vs empty slide), then plan a scan
+   that covers the whole sample with overlap. Replaces the user-supplied `--rows`/
+   `--cols` grid in `acquire`.
+3. **Brightfield → fluorescence** — a deep-learning model for virtual staining /
+   modality translation on the mosaic. New inference module + model dependency.
+4. **API** — wrap acquire/stitch/postprocess/survey/inference behind **FastAPI +
+   Pydantic** models for programmatic and remote control.
+5. **Front end** — web UI over the API to launch scans, watch progress, and
+   browse/zoom mosaics.
+
+When picking up any of these, keep the existing conventions (Protocol-based DI,
+lazy heavy imports, `*Error` normalisation, ruff+pytest before merge).
