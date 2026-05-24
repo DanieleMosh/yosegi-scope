@@ -1,6 +1,7 @@
 """Smoke tests for the yosegi CLI surface."""
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
 from yosegi import __version__
@@ -31,12 +32,11 @@ def test_version() -> None:
     assert __version__ in result.output
 
 
-def test_stitch_help_lists_tuning_options() -> None:
-    result = runner.invoke(app, ["stitch", "--help"])
-    assert result.exit_code == 0
-    assert "--refine" in result.output
-    assert "--ncc-threshold" in result.output
-    assert "--transpose" in result.output
+def test_stitch_exposes_tuning_options() -> None:
+    # inspect the declared option flags directly, independent of help rendering
+    stitch_cmd = typer.main.get_command(app).commands["stitch"]
+    flags = {opt for param in stitch_cmd.params for opt in param.opts}
+    assert {"--refine", "--ncc-threshold", "--transpose"} <= flags
 
 
 def test_stitch_missing_dir_exits_cleanly(tmp_path) -> None:
