@@ -1,11 +1,21 @@
 """Smoke tests for the yosegi CLI surface."""
 
+import pytest
 from typer.testing import CliRunner
 
 from yosegi import __version__
 from yosegi.cli import app
 
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def _wide_terminal(monkeypatch):
+    """Force a wide terminal so Typer/Rich does not wrap or truncate help text.
+
+    CI runs in an 80-column terminal, which splits long option names across lines.
+    """
+    monkeypatch.setenv("COLUMNS", "200")
 
 
 def test_help_lists_commands() -> None:
