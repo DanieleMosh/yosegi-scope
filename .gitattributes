@@ -1,0 +1,2 @@
+# Treat the lockfile as binary so it doesn't produce noisy diffs in PRs.
+uv.lock binary

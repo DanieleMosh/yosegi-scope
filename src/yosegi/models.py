@@ -12,7 +12,7 @@ class Tile:
 
     `row`/`col` are the tile's index in the raster grid (0-based). The optional
     `stage_x`/`stage_y`/`stage_z` record the OpenFlexure stage position (in steps)
-    at capture time, which can seed the stitcher's initial position guess.
+    at capture time; these are also embedded in each tile's EXIF for the stitcher.
     """
 
     path: Path

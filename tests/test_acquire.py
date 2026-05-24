@@ -16,16 +16,31 @@ class FakeMicroscope:
     and records call order so tests can assert raster behavior.
     """
 
-    def __init__(self, start: tuple[int, int, int] = (1000, 2000, 3000)) -> None:
+    def __init__(
+        self,
+        start: tuple[int, int, int] = (1000, 2000, 3000),
+        csm: list[list[float]] | None = None,
+    ) -> None:
         self._pos = {"x": start[0], "y": start[1], "z": start[2]}
         self.captures = 0
         self.autofocus_calls = 0
+        self.calibrate_calls = 0
+        self.csm = csm
         self.move_history: list[dict] = []
         self.visited: list[tuple[int, int]] = []
 
     @property
     def position(self) -> dict[str, int]:
         return dict(self._pos)
+
+    def pull_settings(self) -> dict:
+        ext = {}
+        if self.csm is not None:
+            ext["org.openflexure.camera_stage_mapping"] = {"image_to_stage_displacement": self.csm}
+        return {"extensions": ext}
+
+    def calibrate_xy(self) -> None:
+        self.calibrate_calls += 1
 
     def move(self, position: dict[str, int], absolute: bool = True) -> None:
         if absolute:
@@ -116,67 +131,47 @@ def test_invalid_grid_raises(tmp_path: Path) -> None:
     assert not (tmp_path / "x").exists()
 
 
-class WindowFakeMicroscope:
-    """Fake whose captures are a moving window into a fixed textured source.
-
-    move_rel shifts the window by ``stage / steps_per_pixel`` pixels, so a known
-    stage move produces a real, correlatable image shift — exercising calibration.
-    """
-
-    def __init__(self, steps_per_pixel: float = 4.0) -> None:
-        import numpy as np
-
-        self.spp = steps_per_pixel
-        rng = np.random.default_rng(0)
-        self.base = np.zeros((2000, 2600), np.uint8)
-        ys = rng.integers(0, 2000, 9000)
-        xs = rng.integers(0, 2600, 9000)
-        for y, x in zip(ys, xs, strict=True):
-            self.base[max(0, y - 2) : y + 2, max(0, x - 2) : x + 2] = rng.integers(120, 255)
-        self._pos = {"x": 2000, "y": 2000, "z": 0}
-
-    @property
-    def position(self) -> dict[str, int]:
-        return dict(self._pos)
-
-    def move(self, position: dict[str, int], absolute: bool = True) -> None:
-        if absolute:
-            self._pos = {k: int(position[k]) for k in ("x", "y", "z")}
-        else:
-            for k in ("x", "y", "z"):
-                self._pos[k] += int(position[k])
-
-    def move_rel(self, position: dict[str, int]) -> None:
-        self.move(position, absolute=False)
-
-    def autofocus(self, dz: int = 2000) -> None:
-        pass
-
-    def capture_image(self) -> PIL.Image.Image:
-        ox = int(self._pos["x"] / self.spp)
-        oy = int(self._pos["y"] / self.spp)
-        return PIL.Image.fromarray(self.base[oy : oy + 624, ox : ox + 832]).convert("RGB")
+_CSM = [[0.01, -4.4], [-4.37, 0.0]]
 
 
-def test_calibration_records_steps_per_pixel(tmp_path: Path) -> None:
-    # spp 6.0 with the default 3000-step probe gives a 500px shift (well inside the frame)
-    scope = WindowFakeMicroscope(steps_per_pixel=6.0)
+def _read_tile_exif(path: Path) -> dict:
+    import piexif
+
+    exif = piexif.load(str(path))
+    raw = exif["Exif"][piexif.ExifIFD.UserComment]
+    return json.loads(raw.decode())  # raw UTF-8 JSON, matching openflexure-stitching
+
+
+def test_csm_recorded_in_manifest_and_exif(tmp_path: Path) -> None:
+    scope = FakeMicroscope(start=(3600, -5600, 0), csm=_CSM)
+    tiles = fetch_tiles(
+        host=None, out_dir=tmp_path, rows=2, cols=2, step_x=400, step_y=400, client=scope
+    )
+
+    manifest = json.loads((tmp_path / "manifest.json").read_text())
+    assert manifest["camera_stage_mapping"] == _CSM
+
+    uc = _read_tile_exif(tiles[0].path)
+    assert uc["stage"]["position"]["x"] == 3600
+    assert uc["camera_stage_mapping"]["image_to_stage_displacement_matrix"] == _CSM
+
+
+def test_missing_csm_triggers_calibration_then_records_none(tmp_path: Path) -> None:
+    # no stored CSM and calibrate_xy is a no-op fake -> calibration attempted, CSM stays None
+    scope = FakeMicroscope(csm=None)
     fetch_tiles(
         host=None, out_dir=tmp_path, rows=2, cols=2, step_x=400, step_y=400,
         calibrate=True, client=scope,
     )
+    assert scope.calibrate_calls == 1
     manifest = json.loads((tmp_path / "manifest.json").read_text())
-    spp = manifest["steps_per_pixel"]
-    # measured value should be close to the true 6.0 steps/pixel
-    assert spp["x"] is not None
-    assert abs(spp["x"] - 6.0) < 0.5
+    assert manifest["camera_stage_mapping"] is None
 
 
-def test_calibration_skipped_when_disabled(tmp_path: Path) -> None:
-    scope = WindowFakeMicroscope()
+def test_no_calibration_when_disabled(tmp_path: Path) -> None:
+    scope = FakeMicroscope(csm=None)
     fetch_tiles(
         host=None, out_dir=tmp_path, rows=2, cols=2, step_x=400, step_y=400,
         calibrate=False, client=scope,
     )
-    manifest = json.loads((tmp_path / "manifest.json").read_text())
-    assert manifest["steps_per_pixel"] == {"x": None, "y": None}
+    assert scope.calibrate_calls == 0

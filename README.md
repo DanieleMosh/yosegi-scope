@@ -16,26 +16,22 @@ stitching required.
 - **Acquire** — [`openflexure-microscope-client`](https://pypi.org/project/openflexure-microscope-client/)
   drives the scope (mDNS/IP discovery, stage moves, autofocus, capture) to raster
   an XY grid of overlapping tiles.
-- **Stitch** — by default tiles are placed from their recorded **stage
-  coordinates**, converted to pixels with a steps-per-pixel calibration that
-  `acquire` measures automatically and writes into `manifest.json`. The
-  OpenFlexure camera's axis orientation (image inverted vs the stage) is applied
-  automatically, so the mosaic comes out the right way round with no flags. This is
-  robust and always produces a coherent mosaic (it trusts the motors, not image
-  content), then [Pillow](https://python-pillow.org/) composites the tiles onto one
-  canvas.
-  Pass `--refine` to additionally run [`m2stitch`](https://m2stitch.readthedocs.io/)
-  (MIST-based phase correlation) for pixel-perfect seams — it is seeded with the
-  coordinate positions, so it only searches a small window. Refinement needs
-  textured tiles, real overlap, and a ≥2×3 grid; `--ncc-threshold` (lower for faint
-  samples) and `--transpose` (the OpenFlexure camera's image axes are swapped vs the
-  stage) tune it. The grid layout is read from `manifest.json`, or recovered from the
-  `tile_r{row}_c{col}` filenames. Seam/exposure blending is a future enhancement.
+- **Stitch** — uses [`openflexure-stitching`](https://gitlab.com/openflexure/openflexure-stitching),
+  the official OpenFlexure tool. `acquire` embeds each tile's **stage position** and
+  the scope's **camera-stage-mapping (CSM) affine matrix** in EXIF; the stitcher
+  places tiles by `stage × affine` (correctly handling the camera's rotation and
+  scaling) and refines with high-pass phase correlation + a least-squares global
+  optimisation. `--no-correlate` does stage+affine placement only, which is reliable
+  on faint samples where correlation can't connect tiles.
 
 ## Requirements
 
 - Python **3.11** (pinned: some pinned dependency wheels are unavailable on 3.12).
 - [`uv`](https://docs.astral.sh/uv/) for environment and dependency management.
+- **libvips** — a native library `openflexure-stitching` needs:
+  `brew install vips` (macOS) or `sudo apt-get install libvips` (Debian/Ubuntu).
+  On macOS, if stitching fails to load libvips, prefix commands with
+  `DYLD_FALLBACK_LIBRARY_PATH=$(brew --prefix)/lib`.
 
 ## Install
 
@@ -56,11 +52,11 @@ uv run yosegi acquire --host microscope.local --output ./tiles \
 # Autofocus runs at every tile by default; pass --no-autofocus to skip it
 uv run yosegi acquire --host microscope.local --output ./tiles --no-autofocus
 
-# Stitch a folder of tiles into one composite (placed by stage coordinates)
+# Stitch a folder of tiles into one composite (stage+affine placement + correlation)
 uv run yosegi stitch --input ./tiles --output mosaic.jpg
 
-# Refine the seams with m2stitch correlation (faint sample needs a lower threshold)
-uv run yosegi stitch --input ./tiles --output mosaic.jpg --refine --ncc-threshold 0.3
+# Stage+affine placement only (reliable on faint/low-texture samples)
+uv run yosegi stitch --input ./tiles --output mosaic.jpg --no-correlate
 
 # Acquire then stitch in one pass
 uv run yosegi run --host microscope.local --output mosaic.jpg
@@ -72,11 +68,10 @@ The stage moves `--step-x`/`--step-y` **stage steps** between adjacent tiles, in
 snake pattern, autofocuses at each tile (disable with `--no-autofocus`), and returns
 to the start when done. The right step size depends on your objective and sample —
 pick a value that leaves the desired overlap between neighbouring tiles. Before
-scanning, `acquire` measures the stage **steps-per-pixel**
-(one move+measure per axis) and records it in `manifest.json` along with the grid and
-per-tile stage positions; this is what lets the stitcher place tiles by coordinate.
-`--overlap` is recorded as metadata and is only used as a placement fallback when
-calibration is unavailable.
+scanning, `acquire` reads the scope's **camera-stage-mapping** calibration (running
+it once if absent) and writes each tile's stage position and that affine matrix into
+EXIF, which is what the stitcher uses to place tiles. `--overlap` is recorded as
+metadata only.
 
 ## Development
 
@@ -88,10 +83,10 @@ uv run ruff check    # lint
 ## Roadmap
 
 - [x] Implement the acquisition raster (XY grid, autofocus, capture) in `acquire.py`.
-- [x] Implement m2stitch alignment + Pillow compositing in `stitch.py`.
-- [ ] Seam blending and exposure/flat-field correction.
+- [x] Stitch via `openflexure-stitching` (EXIF stage coords + CSM affine matrix).
+- [x] CI workflow (ruff + pytest).
+- [ ] Tune correlation for faint samples (high-pass) / seam blending.
 - [ ] Config file and richer error handling.
-- [ ] CI workflow.
 
 ## License
 

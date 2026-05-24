@@ -9,9 +9,9 @@ authors = [
 license = { text = "GPL-3.0-or-later" }
 requires-python = ">=3.11,<3.12"
 dependencies = [
-    "m2stitch>=0.7.0",
     "numpy>=1.26.4",
     "openflexure-microscope-client>=0.1.8",
+    "openflexure-stitching>=0.2.5",
     "pillow>=9.5.0",
     "typer>=0.25.1",
 ]
