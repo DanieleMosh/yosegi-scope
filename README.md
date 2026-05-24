@@ -8,8 +8,15 @@ As the scope scans a sample it produces a series of overlapping image patches.
 aligns them, and merges them into a single seamless composite — no manual
 stitching required.
 
+The longer-term goal is a self-driving digital-pathology pipeline: the microscope
+detects the sample's extent and **surveys the whole slide automatically**, the scan
+is cleaned with **image post-processing**, a model performs **brightfield →
+fluorescence** translation, and the whole thing is exposed as an **API** behind a
+web **front end**. See the [Roadmap](#roadmap).
+
 > **Status:** acquisition and stitching both work — `acquire` rasters a grid and
 > saves tiles + manifest, and `stitch` aligns and merges them into a composite.
+> Image post-processing is the next step; see the roadmap for what follows.
 
 ## How it works
 
@@ -23,6 +30,10 @@ stitching required.
   scaling) and refines with high-pass phase correlation + a least-squares global
   optimisation. `--no-correlate` does stage+affine placement only, which is reliable
   on faint samples where correlation can't connect tiles.
+- **Post-process** *(next)* — standard techniques to make the composite cleaner and
+  more accurate: flat-field / illumination correction to remove vignetting, seam
+  exposure blending so tile edges disappear, white balance / contrast normalisation,
+  and optional denoising and background flattening.
 
 ## Requirements
 
@@ -82,11 +93,32 @@ uv run ruff check    # lint
 
 ## Roadmap
 
-- [x] Implement the acquisition raster (XY grid, autofocus, capture) in `acquire.py`.
-- [x] Stitch via `openflexure-stitching` (EXIF stage coords + CSM affine matrix).
-- [x] CI workflow (ruff + pytest).
-- [ ] Tune correlation for faint samples (high-pass) / seam blending.
-- [ ] Config file and richer error handling.
+Done:
+
+- [x] Acquisition raster (XY grid, autofocus, capture) — `acquire.py`.
+- [x] Stitching via `openflexure-stitching` (EXIF stage coords + CSM affine matrix).
+- [x] CI (ruff + pytest).
+
+**Now — post-processing.** Apply standard techniques to the stitched composite for a
+cleaner, more accurate result: flat-field/illumination correction, seam exposure
+blending, white-balance and contrast normalisation, and optional denoising. Goal: a
+mosaic with no visible tile seams or vignetting.
+
+Planned, in order:
+
+1. **Automatic whole-slide survey.** Instead of a user-defined N×N grid, the scope
+   first detects the **sample boundary** (e.g. a low-magnification overview +
+   thresholding/segmentation to find tissue vs empty slide), then plans and runs a
+   scan that covers the whole sample with adequate overlap. Output: a complete mosaic
+   of the slide with no manual grid sizing.
+2. **Brightfield → fluorescence.** A deep-learning model performs virtual staining /
+   modality translation from the brightfield mosaic to a fluorescence-like image,
+   surfacing structure that brightfield alone doesn't show.
+3. **API.** Wrap acquisition, stitching, post-processing, survey, and inference behind
+   a typed service (FastAPI + Pydantic models) so the pipeline can be driven
+   programmatically and remotely.
+4. **Front end.** A web UI on top of the API to launch scans, watch progress, and
+   browse/zoom the resulting mosaics.
 
 ## License
 
