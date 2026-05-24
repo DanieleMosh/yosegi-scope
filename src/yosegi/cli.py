@@ -86,19 +86,23 @@ def acquire(
 def stitch(
     input: Path = typer.Option(..., "--input", "-i", help="Directory of captured tiles."),
     output: Path = typer.Option(..., "--output", "-o", help="Path for the composite image."),
+    refine: bool = typer.Option(
+        False, "--refine/--no-refine", help="Refine coordinate placement with m2stitch correlation."
+    ),
     ncc_threshold: float = typer.Option(
-        0.5, "--ncc-threshold", help="m2stitch pair-acceptance cutoff; lower for faint samples."
+        0.5, "--ncc-threshold", help="Refinement pair-acceptance cutoff; lower for faint samples."
     ),
     transpose: bool = typer.Option(
-        False, "--transpose/--no-transpose", help="Swap row/col axes (use for OpenFlexure cameras)."
+        False, "--transpose/--no-transpose", help="Swap row/col axes during refinement (OpenFlexure)."
     ),
 ) -> None:
-    """Align and merge tiles into a single seamless composite."""
+    """Merge tiles into a composite (by stage coordinates; --refine to correlate)."""
     from yosegi.stitch import StitchError, stitch_tiles
 
     try:
         result = stitch_tiles(
-            in_dir=input, out_file=output, ncc_threshold=ncc_threshold, transpose=transpose
+            in_dir=input, out_file=output, refine=refine,
+            ncc_threshold=ncc_threshold, transpose=transpose,
         )
     except (StitchError, NotImplementedError) as exc:
         _abort(exc)
@@ -117,11 +121,14 @@ def run(
         False, "--autofocus/--no-autofocus", help="Autofocus at each tile before capture."
     ),
     overlap: float = typer.Option(0.2, "--overlap", help="Fractional tile overlap (recorded as metadata only)."),
+    refine: bool = typer.Option(
+        False, "--refine/--no-refine", help="Refine coordinate placement with m2stitch correlation."
+    ),
     ncc_threshold: float = typer.Option(
-        0.5, "--ncc-threshold", help="m2stitch pair-acceptance cutoff; lower for faint samples."
+        0.5, "--ncc-threshold", help="Refinement pair-acceptance cutoff; lower for faint samples."
     ),
     transpose: bool = typer.Option(
-        False, "--transpose/--no-transpose", help="Swap row/col axes (use for OpenFlexure cameras)."
+        False, "--transpose/--no-transpose", help="Swap row/col axes during refinement (OpenFlexure)."
     ),
 ) -> None:
     """Acquire tiles from the microscope, then stitch them into a mosaic."""
@@ -141,7 +148,8 @@ def run(
             overlap=overlap,
         )
         result = stitch_tiles(
-            in_dir=tile_dir, out_file=output, ncc_threshold=ncc_threshold, transpose=transpose
+            in_dir=tile_dir, out_file=output, refine=refine,
+            ncc_threshold=ncc_threshold, transpose=transpose,
         )
     except (AcquisitionError, StitchError, NotImplementedError) as exc:
         _abort(exc)

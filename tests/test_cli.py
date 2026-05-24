@@ -24,6 +24,7 @@ def test_version() -> None:
 def test_stitch_help_lists_tuning_options() -> None:
     result = runner.invoke(app, ["stitch", "--help"])
     assert result.exit_code == 0
+    assert "--refine" in result.output
     assert "--ncc-threshold" in result.output
     assert "--transpose" in result.output
 
