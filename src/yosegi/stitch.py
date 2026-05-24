@@ -1,12 +1,14 @@
 """Align overlapping tiles and merge them into one seamless composite.
 
-Tiles are aligned with ``m2stitch`` (a MIST-inspired phase-correlation grid
-stitcher) and composited onto a single canvas with Pillow. The tile/grid layout
-is read from the acquire manifest (schema ``yosegi.acquire/1``) when present, and
-otherwise recovered from the ``tile_r{row}_c{col}`` filename convention.
+By default tiles are placed from their recorded stage coordinates (converted to
+pixels with the steps-per-pixel calibration written by ``acquire``), which is
+robust and always produces a coherent mosaic. With ``refine=True`` the placement
+is improved by ``m2stitch`` (a MIST-inspired phase-correlation stitcher), seeded
+with the coordinate positions so it only has to find a small correction.
 
-m2stitch needs textured tiles, real overlap, and at least two tiles in each
-direction; when it cannot align the grid the failure is normalized into
+The tile/grid layout is read from the acquire manifest (schema
+``yosegi.acquire/1``) when present, and otherwise recovered from the
+``tile_r{row}_c{col}`` filename convention. Failures are normalized into
 :class:`StitchError` and no image is written.
 """
 
@@ -24,16 +26,21 @@ _MANIFEST_SCHEMA = "yosegi.acquire/1"
 # tile_r00_c01.jpg -> row=0, col=1
 _TILE_RE = re.compile(r"^tile_r(\d+)_c(\d+)\.(jpe?g|png)$", re.IGNORECASE)
 
+# One tile: (path, row, col, stage_x | None, stage_y | None)
+Tile = tuple[Path, int, int, "int | None", "int | None"]
+
 
 class StitchError(RuntimeError):
     """Raised when tiles cannot be discovered, loaded, or aligned into a mosaic."""
 
 
-def _discover_tiles(in_dir: Path) -> list[tuple[Path, int, int]]:
-    """Return ``[(path, row, col), ...]`` sorted by ``(row, col)``.
+def _discover_tiles(in_dir: Path) -> tuple[list[Tile], dict]:
+    """Return ``(tiles, meta)`` where tiles are sorted by ``(row, col)``.
 
-    Prefers ``manifest.json`` (schema ``yosegi.acquire/1``); falls back to
-    globbing ``tile_r*_c*`` files and parsing row/col from the filename.
+    ``tiles`` is a list of ``(path, row, col, stage_x, stage_y)``. ``meta`` holds
+    manifest-level fields used for placement (``steps_per_pixel``, ``step``,
+    ``overlap``) and is empty when there is no manifest. Prefers ``manifest.json``
+    (schema ``yosegi.acquire/1``); falls back to globbing ``tile_r*_c*`` files.
     """
     in_dir = Path(in_dir)
     if not in_dir.is_dir():
@@ -41,10 +48,10 @@ def _discover_tiles(in_dir: Path) -> list[tuple[Path, int, int]]:
     manifest_path = in_dir / "manifest.json"
     if manifest_path.exists():
         return _tiles_from_manifest(in_dir, manifest_path)
-    return _tiles_from_glob(in_dir)
+    return _tiles_from_glob(in_dir), {}
 
 
-def _tiles_from_manifest(in_dir: Path, manifest_path: Path) -> list[tuple[Path, int, int]]:
+def _tiles_from_manifest(in_dir: Path, manifest_path: Path) -> tuple[list[Tile], dict]:
     try:
         manifest = json.loads(manifest_path.read_text())
     except (OSError, json.JSONDecodeError) as exc:
@@ -54,7 +61,7 @@ def _tiles_from_manifest(in_dir: Path, manifest_path: Path) -> list[tuple[Path, 
         raise StitchError(
             f"Unsupported manifest schema {schema!r} in {manifest_path} (expected {_MANIFEST_SCHEMA!r})"
         )
-    tiles: list[tuple[Path, int, int]] = []
+    tiles: list[Tile] = []
     for entry in manifest.get("tiles") or []:
         try:
             path = in_dir / entry["filename"]
@@ -64,22 +71,27 @@ def _tiles_from_manifest(in_dir: Path, manifest_path: Path) -> list[tuple[Path, 
             raise StitchError(f"Malformed tile entry in manifest: {entry!r} ({exc})") from exc
         if not path.exists():
             raise StitchError(f"Manifest references missing tile file: {path}")
-        tiles.append((path, row, col))
+        tiles.append((path, row, col, entry.get("stage_x"), entry.get("stage_y")))
     if not tiles:
         raise StitchError(f"Manifest {manifest_path} lists no tiles")
     tiles.sort(key=lambda t: (t[1], t[2]))
-    return tiles
+    meta = {
+        "steps_per_pixel": manifest.get("steps_per_pixel"),
+        "step": manifest.get("step"),
+        "overlap": manifest.get("overlap"),
+    }
+    return tiles, meta
 
 
-def _tiles_from_glob(in_dir: Path) -> list[tuple[Path, int, int]]:
-    tiles: list[tuple[Path, int, int]] = []
+def _tiles_from_glob(in_dir: Path) -> list[Tile]:
+    tiles: list[Tile] = []
     for path in sorted(in_dir.iterdir()):
         if not path.is_file():
             continue
         match = _TILE_RE.match(path.name)
         if not match:
             continue
-        tiles.append((path, int(match.group(1)), int(match.group(2))))
+        tiles.append((path, int(match.group(1)), int(match.group(2)), None, None))
     if not tiles:
         raise StitchError(
             f"No tiles found in {in_dir}. Expected a manifest.json or files named like tile_r00_c00.jpg"
@@ -88,10 +100,10 @@ def _tiles_from_glob(in_dir: Path) -> list[tuple[Path, int, int]]:
     return tiles
 
 
-def _load_tiles(tiles: list[tuple[Path, int, int]]):
+def _load_tiles(tiles: list[Tile]):
     """Load tiles as a ``(N, H, W)`` grayscale stack plus parallel RGB images.
 
-    All tiles must share one ``(H, W)``; m2stitch requires it. Returns
+    All tiles must share one ``(H, W)``. Returns
     ``(stack, rgb_images, rows, cols, tile_w, tile_h)``.
     """
     import numpy as np
@@ -102,7 +114,7 @@ def _load_tiles(tiles: list[tuple[Path, int, int]]):
     rows: list[int] = []
     cols: list[int] = []
     size: tuple[int, int] | None = None  # (W, H)
-    for path, row, col in tiles:
+    for path, row, col, _sx, _sy in tiles:
         try:
             img = Image.open(path)
             img.load()
@@ -124,38 +136,65 @@ def _load_tiles(tiles: list[tuple[Path, int, int]]):
     return stack, rgb, rows, cols, tile_w, tile_h
 
 
-def _align(stack, rows: list[int], cols: list[int], ncc_threshold: float = 0.5, transpose: bool = False):
-    """Run m2stitch and return parallel ``(x_pos, y_pos)`` pixel arrays.
+def _coordinate_positions(tiles: list[Tile], meta: dict, rows: list[int], cols: list[int],
+                          tile_w: int, tile_h: int):
+    """Compute per-tile pixel ``(x_pos, y_pos)`` from stage coordinates.
 
-    With ``transpose=False`` (m2stitch's ``row_col_transpose=False``), ``x_pos``
-    maps to the column (horizontal) axis and ``y_pos`` to the row (vertical) axis,
-    matching PIL's paste convention. Some cameras (notably the OpenFlexure scope,
-    whose stage and image axes are swapped) need ``transpose=True`` instead.
-    ``ncc_threshold`` is m2stitch's correlation cutoff for accepting tile pairs;
-    lower it (e.g. 0.3) for faint or low-texture samples. Any m2stitch failure is
-    normalized into :class:`StitchError`.
+    Uses the manifest's ``steps_per_pixel`` to convert each tile's stage_x/stage_y
+    to pixels. Falls back to a regular grid from ``overlap`` (then a default 20%
+    overlap) when calibration or stage coordinates are unavailable. Always
+    succeeds, so this is the robust default placement.
     """
+    spp = (meta or {}).get("steps_per_pixel") or {}
+    spp_x, spp_y = spp.get("x"), spp.get("y")
+    have_coords = all(t[3] is not None and t[4] is not None for t in tiles)
+
+    if spp_x and spp_y and have_coords:
+        x_pos = [t[3] / spp_x for t in tiles]
+        y_pos = [t[4] / spp_y for t in tiles]
+        return x_pos, y_pos
+
+    # Fallback: regular grid spacing from the requested overlap.
+    overlap = (meta or {}).get("overlap")
+    if not isinstance(overlap, (int, float)) or not (0 <= overlap < 1):
+        overlap = 0.2
+    step_px_x = tile_w * (1 - overlap)
+    step_px_y = tile_h * (1 - overlap)
+    x_pos = [c * step_px_x for c in cols]
+    y_pos = [r * step_px_y for r in rows]
+    return x_pos, y_pos
+
+
+def _refine(stack, rows: list[int], cols: list[int], x_pos, y_pos, tile_w: int, tile_h: int,
+            ncc_threshold: float = 0.5, transpose: bool = False):
+    """Refine coordinate positions with m2stitch, seeded by the initial guess.
+
+    Passes the coordinate positions as ``position_initial_guess`` so m2stitch only
+    searches a small window around each tile, avoiding the spurious large jumps it
+    makes on low-texture or repetitive samples. Returns refined ``(x_pos, y_pos)``;
+    raises :class:`StitchError` if m2stitch cannot align.
+    """
+    import numpy as np
     import m2stitch
 
-    n_rows = len(set(rows))
-    n_cols = len(set(cols))
+    n_rows, n_cols = len(set(rows)), len(set(cols))
     if len(rows) < 4 or n_rows < 2 or n_cols < 2:
         raise StitchError(
-            f"Need at least a 2x2 grid of overlapping tiles to stitch (found {n_rows} row(s) x "
-            f"{n_cols} col(s), {len(rows)} tile(s)). A 2x3 or larger grid with ~30-40% overlap is recommended."
+            f"Refinement needs at least a 2x2 grid (found {n_rows}x{n_cols}, {len(rows)} tiles)."
         )
+    # m2stitch initial guess is in (y, x) pixel order per tile.
+    guess = np.array([[float(y), float(x)] for x, y in zip(x_pos, y_pos)])
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             grid_df, _ = m2stitch.stitch_images(
-                stack, rows=rows, cols=cols, row_col_transpose=transpose, ncc_threshold=ncc_threshold
+                stack, rows=rows, cols=cols, row_col_transpose=transpose,
+                ncc_threshold=ncc_threshold, position_initial_guess=guess,
             )
-    except Exception as exc:  # AssertionError ("no good pair"), ValueError, internal filters, etc.
+    except Exception as exc:
         raise StitchError(
-            f"Could not align tiles ({type(exc).__name__}: {exc}). This usually means too little "
-            f"overlap, too few tiles, or low-texture images. Try a >=2x3 grid with ~30-40% overlap, "
-            f"lower --ncc-threshold (currently {ncc_threshold}), or --transpose if the camera axes "
-            f"are swapped (common on OpenFlexure)."
+            f"Refinement failed ({type(exc).__name__}: {exc}). Try without --refine, "
+            f"lower --ncc-threshold (currently {ncc_threshold}), or --transpose."
         ) from exc
     return grid_df["x_pos"].to_numpy(), grid_df["y_pos"].to_numpy()
 
@@ -181,24 +220,34 @@ def _composite(rgb_images, x_pos, y_pos, tile_w: int, tile_h: int):
 
 
 def stitch_tiles(
-    in_dir: Path, out_file: Path, ncc_threshold: float = 0.5, transpose: bool = False
+    in_dir: Path,
+    out_file: Path,
+    refine: bool = False,
+    ncc_threshold: float = 0.5,
+    transpose: bool = False,
 ) -> MosaicResult:
-    """Align tiles in ``in_dir`` and write the merged mosaic to ``out_file``.
+    """Place tiles in ``in_dir`` and write the merged mosaic to ``out_file``.
 
-    Reads the acquire manifest (or the tile filenames) to recover the grid,
-    aligns the tiles with m2stitch, composites them with Pillow, and saves the
-    result. ``ncc_threshold`` is m2stitch's pair-acceptance correlation cutoff;
-    lower it for faint or low-texture samples. Set ``transpose=True`` when the
-    camera's image axes are swapped relative to the stage (common on OpenFlexure).
-    Raises :class:`StitchError` (writing nothing) if the tiles cannot be
-    discovered, loaded, or aligned. Returns a :class:`~yosegi.models.MosaicResult`.
+    By default tiles are placed from their recorded stage coordinates (robust,
+    always coherent). With ``refine=True`` the placement is improved by m2stitch,
+    seeded with those coordinates; if refinement fails the call raises
+    :class:`StitchError`. ``ncc_threshold`` and ``transpose`` only affect
+    refinement. Raises :class:`StitchError` (writing nothing) if tiles cannot be
+    discovered or loaded. Returns a :class:`~yosegi.models.MosaicResult`.
     """
     in_dir = Path(in_dir)
     out_file = Path(out_file)
 
-    tiles = _discover_tiles(in_dir)
+    tiles, meta = _discover_tiles(in_dir)
     stack, rgb, rows, cols, tile_w, tile_h = _load_tiles(tiles)
-    x_pos, y_pos = _align(stack, rows, cols, ncc_threshold=ncc_threshold, transpose=transpose)
+
+    x_pos, y_pos = _coordinate_positions(tiles, meta, rows, cols, tile_w, tile_h)
+    if refine:
+        x_pos, y_pos = _refine(
+            stack, rows, cols, x_pos, y_pos, tile_w, tile_h,
+            ncc_threshold=ncc_threshold, transpose=transpose,
+        )
+
     canvas, width, height = _composite(rgb, x_pos, y_pos, tile_w, tile_h)
 
     try:
