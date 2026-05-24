@@ -18,9 +18,12 @@ stitching required.
   an XY grid of overlapping tiles.
 - **Stitch** — by default tiles are placed from their recorded **stage
   coordinates**, converted to pixels with a steps-per-pixel calibration that
-  `acquire` measures automatically and writes into `manifest.json`. This is robust
-  and always produces a coherent mosaic (it trusts the motors, not image content),
-  then [Pillow](https://python-pillow.org/) composites the tiles onto one canvas.
+  `acquire` measures automatically and writes into `manifest.json`. The
+  OpenFlexure camera's axis orientation (image inverted vs the stage) is applied
+  automatically, so the mosaic comes out the right way round with no flags. This is
+  robust and always produces a coherent mosaic (it trusts the motors, not image
+  content), then [Pillow](https://python-pillow.org/) composites the tiles onto one
+  canvas.
   Pass `--refine` to additionally run [`m2stitch`](https://m2stitch.readthedocs.io/)
   (MIST-based phase correlation) for pixel-perfect seams — it is seeded with the
   coordinate positions, so it only searches a small window. Refinement needs
@@ -50,14 +53,14 @@ uv run yosegi --help
 uv run yosegi acquire --host microscope.local --output ./tiles \
     --rows 3 --cols 3 --step-x 2000 --step-y 2000
 
-# Autofocus before every tile
-uv run yosegi acquire --host microscope.local --output ./tiles --autofocus
+# Autofocus runs at every tile by default; pass --no-autofocus to skip it
+uv run yosegi acquire --host microscope.local --output ./tiles --no-autofocus
 
 # Stitch a folder of tiles into one composite (placed by stage coordinates)
 uv run yosegi stitch --input ./tiles --output mosaic.jpg
 
-# Refine the seams with m2stitch correlation (OpenFlexure: axes swapped, faint sample)
-uv run yosegi stitch --input ./tiles --output mosaic.jpg --refine --transpose --ncc-threshold 0.3
+# Refine the seams with m2stitch correlation (faint sample needs a lower threshold)
+uv run yosegi stitch --input ./tiles --output mosaic.jpg --refine --ncc-threshold 0.3
 
 # Acquire then stitch in one pass
 uv run yosegi run --host microscope.local --output mosaic.jpg
@@ -66,9 +69,10 @@ uv run yosegi run --host microscope.local --output mosaic.jpg
 If `--host` is omitted, the microscope is discovered automatically via mDNS.
 
 The stage moves `--step-x`/`--step-y` **stage steps** between adjacent tiles, in a
-snake pattern, and returns to the start when done. The right step size depends on
-your objective and sample — pick a value that leaves the desired overlap between
-neighbouring tiles. Before scanning, `acquire` measures the stage **steps-per-pixel**
+snake pattern, autofocuses at each tile (disable with `--no-autofocus`), and returns
+to the start when done. The right step size depends on your objective and sample —
+pick a value that leaves the desired overlap between neighbouring tiles. Before
+scanning, `acquire` measures the stage **steps-per-pixel**
 (one move+measure per axis) and records it in `manifest.json` along with the grid and
 per-tile stage positions; this is what lets the stitcher place tiles by coordinate.
 `--overlap` is recorded as metadata and is only used as a placement fallback when
