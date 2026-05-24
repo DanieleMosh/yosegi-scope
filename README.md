@@ -8,8 +8,8 @@ As the scope scans a sample it produces a series of overlapping image patches.
 aligns them, and merges them into a single seamless composite — no manual
 stitching required.
 
-> **Status:** acquisition works (rasters a grid and saves tiles + manifest);
-> stitching is still a documented stub awaiting implementation (see the roadmap).
+> **Status:** acquisition and stitching both work — `acquire` rasters a grid and
+> saves tiles + manifest, and `stitch` aligns and merges them into a composite.
 
 ## How it works
 
@@ -18,7 +18,9 @@ stitching required.
   an XY grid of overlapping tiles.
 - **Stitch** — [`m2stitch`](https://m2stitch.readthedocs.io/) (MIST-based) computes
   refined per-tile offsets, then [Pillow](https://python-pillow.org/) composites the
-  tiles onto a single canvas.
+  tiles onto a single canvas. Stitching needs textured tiles with real overlap and a
+  grid of at least 2×3; the layout is read from the run's `manifest.json` (or the tile
+  filenames). Seeding the aligner from stage steps is a future enhancement.
 
 ## Requirements
 
@@ -70,7 +72,7 @@ uv run ruff check    # lint
 ## Roadmap
 
 - [x] Implement the acquisition raster (XY grid, autofocus, capture) in `acquire.py`.
-- [ ] Implement m2stitch alignment + Pillow compositing in `stitch.py`.
+- [x] Implement m2stitch alignment + Pillow compositing in `stitch.py`.
 - [ ] Seam blending and exposure/flat-field correction.
 - [ ] Config file and richer error handling.
 - [ ] CI workflow.
