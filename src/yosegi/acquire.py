@@ -3,9 +3,11 @@
 Acquisition rasters an XY grid in a boustrophedon (snake) order, capturing one
 tile per cell with the official ``openflexure-microscope-client``. The distance
 moved between tiles is given explicitly in stage steps (``step_x``/``step_y``);
-the requested ``overlap`` is recorded as metadata only. Each run writes a
-``manifest.json`` describing the grid and per-tile stage positions, which the
-stitching step consumes to reconstruct the mosaic.
+the requested ``overlap`` is recorded as metadata only.
+
+Each tile is saved with its stage position and the scope's camera-stage-mapping
+(CSM) affine matrix embedded in EXIF, in the format ``openflexure-stitching``
+reads. A ``manifest.json`` is also written as human-readable provenance.
 """
 
 from __future__ import annotations
@@ -36,6 +38,8 @@ class Microscope(Protocol):
     def move_rel(self, position: dict[str, int]) -> Any: ...
     def capture_image(self) -> Any: ...  # returns a PIL.Image
     def autofocus(self, dz: int = 2000) -> Any: ...
+    def pull_settings(self) -> dict[str, Any]: ...
+    def calibrate_xy(self) -> Any: ...
 
 
 def connect(host: str | None) -> Microscope:
@@ -71,59 +75,56 @@ def snake_cells(rows: int, cols: int) -> Iterator[tuple[int, int]]:
             yield row, col
 
 
-def _shift_ncc(a, b, axis: int):
-    """Best (ncc, shift) of ``b`` relative to ``a`` along ``axis`` (0=rows/y, 1=cols/x).
+_CSM_EXTENSION = "org.openflexure.camera_stage_mapping"
 
-    A small 1-D sliding normalized cross-correlation over the overlap region.
-    Returns ``(best_ncc, best_shift_px)``; the shift is always positive.
+
+def _get_csm(scope: Microscope, calibrate: bool) -> list[list[float]] | None:
+    """Return the scope's camera-stage-mapping (CSM) affine matrix.
+
+    Reads the stored ``image_to_stage_displacement`` matrix from the scope
+    settings. When ``calibrate`` is set and no matrix is stored, runs the scope's
+    ``calibrate_xy()`` once (slow: ~2 min of stage motion) and re-reads it.
+    Returns ``None`` (best-effort) if no calibration can be obtained, in which
+    case stitching falls back to stage coordinates plus correlation.
     """
-    size = a.shape[axis]
-    best = (-1.0, 0)
-    for shift in range(size // 10, size - size // 10, 4):
-        if axis == 1:
-            o1, o2 = a[:, shift:], b[:, : size - shift]
-        else:
-            o1, o2 = a[shift:, :], b[: size - shift, :]
-        if o1.size == 0:
-            continue
-        x = o1.astype(float)
-        y = o2.astype(float)
-        x = (x - x.mean()) / (x.std() + 1e-9)
-        y = (y - y.mean()) / (y.std() + 1e-9)
-        ncc = float((x * y).mean())
-        if ncc > best[0]:
-            best = (ncc, shift)
-    return best
 
-
-def _measure_steps_per_pixel(scope: Microscope, probe_steps: int = 3000, min_ncc: float = 0.3):
-    """Estimate stage steps-per-pixel for each axis with one move+measure per axis.
-
-    Captures a frame, moves ``probe_steps`` along one axis, captures again, and
-    finds the pixel shift by cross-correlation; steps-per-pixel is
-    ``probe_steps / shift``. Returns ``{"x": spp_x, "y": spp_y}`` with ``None``
-    for any axis whose correlation is too weak to trust. Best-effort: never
-    raises, so a flaky measurement degrades to ``None`` rather than aborting a scan.
-    """
-    import numpy as np
-
-    def grab():
-        return np.asarray(scope.capture_image().convert("L"))
-
-    result: dict[str, float | None] = {"x": None, "y": None}
-    for axis_key, axis_idx, move in (("x", 1, {"x": probe_steps, "y": 0, "z": 0}),
-                                     ("y", 0, {"x": 0, "y": probe_steps, "z": 0})):
+    def read() -> list[list[float]] | None:
         try:
-            before = grab()
-            scope.move_rel(move)
-            after = grab()
-            scope.move_rel({k: -v for k, v in move.items()})
-            ncc, shift = _shift_ncc(before, after, axis_idx)
-            if ncc >= min_ncc and shift > 0:
-                result[axis_key] = round(probe_steps / shift, 3)
+            ext = scope.pull_settings().get("extensions", {}).get(_CSM_EXTENSION, {})
+            matrix = ext.get("image_to_stage_displacement")
+            return matrix if matrix else None
         except Exception:
-            result[axis_key] = None
-    return result
+            return None
+
+    matrix = read()
+    if matrix is None and calibrate:
+        try:
+            scope.calibrate_xy()
+            matrix = read()
+        except Exception:
+            matrix = None
+    return matrix
+
+
+def _write_tile_exif(path: Path, position: dict[str, int], csm: list[list[float]] | None) -> None:
+    """Embed stage position and CSM in the tile's EXIF UserComment as JSON.
+
+    This is the format ``openflexure-stitching`` reads: ``["stage"]["position"]``
+    for the stage coordinates and
+    ``["camera_stage_mapping"]["image_to_stage_displacement_matrix"]`` for the
+    affine matrix. Best-effort: a failure here does not abort the scan.
+    """
+    import piexif
+    import piexif.helper
+
+    usercomment: dict[str, Any] = {"stage": {"position": dict(position)}}
+    if csm is not None:
+        usercomment["camera_stage_mapping"] = {"image_to_stage_displacement_matrix": csm}
+    try:
+        exif = {"Exif": {piexif.ExifIFD.UserComment: piexif.helper.UserComment.dump(json.dumps(usercomment))}}
+        piexif.insert(piexif.dump(exif), str(path))
+    except Exception:
+        pass
 
 
 def fetch_tiles(
@@ -144,12 +145,11 @@ def fetch_tiles(
     The stage moves ``step_x``/``step_y`` steps between adjacent tiles in a snake
     pattern. ``overlap`` is recorded in the manifest but does not affect motion.
     When ``autofocus`` is set, the scope refocuses before each capture. When
-    ``calibrate`` is set (default), one extra move+measure per axis estimates the
-    stage steps-per-pixel and records it in the manifest, which lets the stitcher
-    place tiles directly from their coordinates. Pass ``client`` to use an
-    already-connected microscope (mainly for testing);
-    otherwise one is opened from ``host`` (or mDNS discovery when ``host`` is
-    ``None``).
+    ``calibrate`` is set (default), the scope's camera-stage-mapping is run if it
+    has none stored. Each tile is saved with its stage position and the CSM affine
+    matrix in EXIF, which is what the stitcher reads. Pass ``client`` to use an
+    already-connected microscope (mainly for testing); otherwise one is opened
+    from ``host`` (or mDNS discovery when ``host`` is ``None``).
 
     Returns one :class:`~yosegi.models.Tile` per captured patch and writes a
     ``manifest.json`` alongside the images.
@@ -165,7 +165,7 @@ def fetch_tiles(
     except OSError as exc:
         raise AcquisitionError(f"Could not create output directory {out_dir}: {exc}") from exc
 
-    steps_per_pixel = _measure_steps_per_pixel(scope) if calibrate else {"x": None, "y": None}
+    csm = _get_csm(scope, calibrate)
 
     start = dict(scope.position)
     tiles: list[Tile] = []
@@ -183,6 +183,7 @@ def fetch_tiles(
         path = out_dir / f"tile_r{row:02d}_c{col:02d}.jpg"
         image.save(path)
         pos = dict(scope.position)
+        _write_tile_exif(path, pos, csm)
         tiles.append(
             Tile(
                 path=path,
@@ -196,7 +197,7 @@ def fetch_tiles(
         prev = (row, col)
 
     scope.move(start, absolute=True)
-    _write_manifest(out_dir, rows, cols, step_x, step_y, overlap, autofocus, start, steps_per_pixel, tiles)
+    _write_manifest(out_dir, rows, cols, step_x, step_y, overlap, autofocus, start, csm, tiles)
     return tiles
 
 
@@ -209,7 +210,7 @@ def _write_manifest(
     overlap: float | None,
     autofocus: bool,
     start: dict[str, int],
-    steps_per_pixel: dict[str, float | None],
+    csm: list[list[float]] | None,
     tiles: list[Tile],
 ) -> Path:
     """Write the acquire->stitch handoff manifest to ``out_dir/manifest.json``."""
@@ -220,7 +221,7 @@ def _write_manifest(
         "step": {"x": step_x, "y": step_y},
         "overlap": overlap,
         "autofocus": autofocus,
-        "steps_per_pixel": steps_per_pixel,
+        "camera_stage_mapping": csm,
         "start_position": start,
         "tiles": [
             {
