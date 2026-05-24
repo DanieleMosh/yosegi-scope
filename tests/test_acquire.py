@@ -54,7 +54,8 @@ def test_snake_cells_boustrophedon() -> None:
 def test_fetch_tiles_captures_grid_and_writes_manifest(tmp_path: Path) -> None:
     scope = FakeMicroscope(start=(1000, 2000, 3000))
     tiles = fetch_tiles(
-        host=None, out_dir=tmp_path, rows=2, cols=3, step_x=100, step_y=50, overlap=0.2, client=scope
+        host=None, out_dir=tmp_path, rows=2, cols=3, step_x=100, step_y=50, overlap=0.2,
+        calibrate=False, client=scope,
     )
 
     assert len(tiles) == 6
@@ -79,7 +80,9 @@ def test_fetch_tiles_captures_grid_and_writes_manifest(tmp_path: Path) -> None:
 
 def test_fetch_tiles_stage_coords_follow_snake(tmp_path: Path) -> None:
     scope = FakeMicroscope(start=(0, 0, 0))
-    tiles = fetch_tiles(host=None, out_dir=tmp_path, rows=2, cols=3, step_x=10, step_y=20, client=scope)
+    tiles = fetch_tiles(
+        host=None, out_dir=tmp_path, rows=2, cols=3, step_x=10, step_y=20, calibrate=False, client=scope
+    )
 
     by_rc = {(t.row, t.col): (t.stage_x, t.stage_y) for t in tiles}
     assert by_rc[(0, 0)] == (0, 0)
@@ -91,11 +94,17 @@ def test_fetch_tiles_stage_coords_follow_snake(tmp_path: Path) -> None:
 
 def test_autofocus_called_only_when_enabled(tmp_path: Path) -> None:
     off = FakeMicroscope()
-    fetch_tiles(host=None, out_dir=tmp_path / "a", rows=2, cols=2, step_x=1, step_y=1, autofocus=False, client=off)
+    fetch_tiles(
+        host=None, out_dir=tmp_path / "a", rows=2, cols=2, step_x=1, step_y=1,
+        autofocus=False, calibrate=False, client=off,
+    )
     assert off.autofocus_calls == 0
 
     on = FakeMicroscope()
-    fetch_tiles(host=None, out_dir=tmp_path / "b", rows=2, cols=2, step_x=1, step_y=1, autofocus=True, client=on)
+    fetch_tiles(
+        host=None, out_dir=tmp_path / "b", rows=2, cols=2, step_x=1, step_y=1,
+        autofocus=True, calibrate=False, client=on,
+    )
     assert on.autofocus_calls == 4
 
 
@@ -105,3 +114,69 @@ def test_invalid_grid_raises(tmp_path: Path) -> None:
         fetch_tiles(host=None, out_dir=tmp_path / "x", rows=0, cols=3, step_x=1, step_y=1, client=scope)
     # validation happens before any side effects
     assert not (tmp_path / "x").exists()
+
+
+class WindowFakeMicroscope:
+    """Fake whose captures are a moving window into a fixed textured source.
+
+    move_rel shifts the window by ``stage / steps_per_pixel`` pixels, so a known
+    stage move produces a real, correlatable image shift — exercising calibration.
+    """
+
+    def __init__(self, steps_per_pixel: float = 4.0) -> None:
+        import numpy as np
+
+        self.spp = steps_per_pixel
+        rng = np.random.default_rng(0)
+        self.base = np.zeros((2000, 2600), np.uint8)
+        ys = rng.integers(0, 2000, 9000)
+        xs = rng.integers(0, 2600, 9000)
+        for y, x in zip(ys, xs):
+            self.base[max(0, y - 2) : y + 2, max(0, x - 2) : x + 2] = rng.integers(120, 255)
+        self._pos = {"x": 2000, "y": 2000, "z": 0}
+
+    @property
+    def position(self) -> dict[str, int]:
+        return dict(self._pos)
+
+    def move(self, position: dict[str, int], absolute: bool = True) -> None:
+        if absolute:
+            self._pos = {k: int(position[k]) for k in ("x", "y", "z")}
+        else:
+            for k in ("x", "y", "z"):
+                self._pos[k] += int(position[k])
+
+    def move_rel(self, position: dict[str, int]) -> None:
+        self.move(position, absolute=False)
+
+    def autofocus(self, dz: int = 2000) -> None:
+        pass
+
+    def capture_image(self) -> PIL.Image.Image:
+        ox = int(self._pos["x"] / self.spp)
+        oy = int(self._pos["y"] / self.spp)
+        return PIL.Image.fromarray(self.base[oy : oy + 624, ox : ox + 832]).convert("RGB")
+
+
+def test_calibration_records_steps_per_pixel(tmp_path: Path) -> None:
+    # spp 6.0 with the default 3000-step probe gives a 500px shift (well inside the frame)
+    scope = WindowFakeMicroscope(steps_per_pixel=6.0)
+    fetch_tiles(
+        host=None, out_dir=tmp_path, rows=2, cols=2, step_x=400, step_y=400,
+        calibrate=True, client=scope,
+    )
+    manifest = json.loads((tmp_path / "manifest.json").read_text())
+    spp = manifest["steps_per_pixel"]
+    # measured value should be close to the true 6.0 steps/pixel
+    assert spp["x"] is not None
+    assert abs(spp["x"] - 6.0) < 0.5
+
+
+def test_calibration_skipped_when_disabled(tmp_path: Path) -> None:
+    scope = WindowFakeMicroscope()
+    fetch_tiles(
+        host=None, out_dir=tmp_path, rows=2, cols=2, step_x=400, step_y=400,
+        calibrate=False, client=scope,
+    )
+    manifest = json.loads((tmp_path / "manifest.json").read_text())
+    assert manifest["steps_per_pixel"] == {"x": None, "y": None}
