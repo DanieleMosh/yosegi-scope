@@ -7,8 +7,14 @@ authors = [
     { name = "Mos Daniele", email = "dany.mosh@yahoo.com" }
 ]
 license = { text = "GPL-3.0-or-later" }
-requires-python = ">=3.12"
-dependencies = []
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "m2stitch>=0.7.0",
+    "numpy>=1.26.4",
+    "openflexure-microscope-client>=0.1.8",
+    "pillow>=9.5.0",
+    "typer>=0.25.1",
+]
 
 [project.scripts]
 yosegi = "yosegi.cli:app"
@@ -19,3 +25,9 @@ packages = ["src/yosegi"]
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "ruff>=0.15.14",
+]
