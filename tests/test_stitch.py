@@ -34,7 +34,7 @@ def _write_tile(path: Path, stage_x: int, stage_y: int, size: tuple[int, int] = 
     piexif.insert(piexif.dump(exif), str(path))
 
 
-def _make_grid(d: Path, rows: int, cols: int, tile: int = 320, step: int = 200) -> None:
+def _make_grid(d: Path, rows: int, cols: int, step: int = 200) -> None:
     """Write an overlapping grid of EXIF-tagged tiles (stage coords on a regular grid)."""
     d.mkdir(parents=True, exist_ok=True)
     for r in range(rows):
