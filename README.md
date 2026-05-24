@@ -18,6 +18,12 @@ web **front end**. See the [Roadmap](#roadmap).
 > saves tiles + manifest, and `stitch` aligns and merges them into a composite.
 > Image post-processing is the next step; see the roadmap for what follows.
 
+![Example stitched mosaic](docs/example_mosaic.jpg)
+
+*A 3×3 scan acquired and stitched by `yosegi run` (stained plant-stem section).
+Tiles are placed from the scope's affine calibration and refined by correlation,
+so the cell structure stays continuous across seams.*
+
 ## How it works
 
 - **Acquire** — [`openflexure-microscope-client`](https://pypi.org/project/openflexure-microscope-client/)
