@@ -112,16 +112,16 @@ def _write_tile_exif(path: Path, position: dict[str, int], csm: list[list[float]
     This is the format ``openflexure-stitching`` reads: ``["stage"]["position"]``
     for the stage coordinates and
     ``["camera_stage_mapping"]["image_to_stage_displacement_matrix"]`` for the
-    affine matrix. Best-effort: a failure here does not abort the scan.
+    affine matrix. The UserComment is raw UTF-8 JSON (no charset prefix), matching
+    how the library decodes it. Best-effort: a failure here does not abort the scan.
     """
     import piexif
-    import piexif.helper
 
     usercomment: dict[str, Any] = {"stage": {"position": dict(position)}}
     if csm is not None:
         usercomment["camera_stage_mapping"] = {"image_to_stage_displacement_matrix": csm}
     try:
-        exif = {"Exif": {piexif.ExifIFD.UserComment: piexif.helper.UserComment.dump(json.dumps(usercomment))}}
+        exif = {"Exif": {piexif.ExifIFD.UserComment: json.dumps(usercomment).encode("utf-8")}}
         piexif.insert(piexif.dump(exif), str(path))
     except Exception:
         pass
