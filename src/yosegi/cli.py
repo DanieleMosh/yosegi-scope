@@ -87,23 +87,23 @@ def acquire(
 def stitch(
     input: Path = typer.Option(..., "--input", "-i", help="Directory of captured tiles."),
     output: Path = typer.Option(..., "--output", "-o", help="Path for the composite image."),
-    refine: bool = typer.Option(
-        False, "--refine/--no-refine", help="Refine coordinate placement with m2stitch correlation."
+    correlate: bool = typer.Option(
+        True, "--correlate/--no-correlate", help="Refine placement with phase correlation (vs stage-only)."
     ),
-    ncc_threshold: float = typer.Option(
-        0.5, "--ncc-threshold", help="Refinement pair-acceptance cutoff; lower for faint samples."
+    high_pass_sigma: float = typer.Option(
+        10.0, "--high-pass-sigma", help="High-pass filter sigma for correlation; lower for faint samples."
     ),
-    transpose: bool = typer.Option(
-        False, "--transpose/--no-transpose", help="Swap row/col axes during refinement (OpenFlexure)."
+    minimum_overlap: float = typer.Option(
+        0.2, "--minimum-overlap", help="Minimum fractional overlap for a tile pair to be correlated."
     ),
 ) -> None:
-    """Merge tiles into a composite (by stage coordinates; --refine to correlate)."""
+    """Merge tiles into a composite with openflexure-stitching."""
     from yosegi.stitch import StitchError, stitch_tiles
 
     try:
         result = stitch_tiles(
-            in_dir=input, out_file=output, refine=refine,
-            ncc_threshold=ncc_threshold, transpose=transpose,
+            in_dir=input, out_file=output, correlate=correlate,
+            high_pass_sigma=high_pass_sigma, minimum_overlap=minimum_overlap,
         )
     except StitchError as exc:
         _abort(exc)
@@ -122,14 +122,14 @@ def run(
         True, "--autofocus/--no-autofocus", help="Autofocus at each tile before capture."
     ),
     overlap: float = typer.Option(0.2, "--overlap", help="Fractional tile overlap (metadata only)."),
-    refine: bool = typer.Option(
-        False, "--refine/--no-refine", help="Refine coordinate placement with m2stitch correlation."
+    correlate: bool = typer.Option(
+        True, "--correlate/--no-correlate", help="Refine placement with phase correlation (vs stage-only)."
     ),
-    ncc_threshold: float = typer.Option(
-        0.5, "--ncc-threshold", help="Refinement pair-acceptance cutoff; lower for faint samples."
+    high_pass_sigma: float = typer.Option(
+        10.0, "--high-pass-sigma", help="High-pass filter sigma for correlation; lower for faint samples."
     ),
-    transpose: bool = typer.Option(
-        False, "--transpose/--no-transpose", help="Swap row/col axes during refinement (OpenFlexure)."
+    minimum_overlap: float = typer.Option(
+        0.2, "--minimum-overlap", help="Minimum fractional overlap for a tile pair to be correlated."
     ),
 ) -> None:
     """Acquire tiles from the microscope, then stitch them into a mosaic."""
@@ -149,8 +149,8 @@ def run(
             overlap=overlap,
         )
         result = stitch_tiles(
-            in_dir=tile_dir, out_file=output, refine=refine,
-            ncc_threshold=ncc_threshold, transpose=transpose,
+            in_dir=tile_dir, out_file=output, correlate=correlate,
+            high_pass_sigma=high_pass_sigma, minimum_overlap=minimum_overlap,
         )
     except (AcquisitionError, StitchError) as exc:
         _abort(exc)
