@@ -76,6 +76,27 @@ def test_accepts_path_pil_and_array(tmp_path: Path) -> None:
     assert from_arr == from_pil == from_path
 
 
+def test_ignores_canvas_black_gaps_in_overview() -> None:
+    """Regression: a gappy stitched overview (RGB 0,0,0 between tiles) must
+    not be classified as dark tissue.
+
+    On the real scope, an overview with step > tile-size produces a canvas with
+    large black gutters. A previous version's Otsu pass treated those gutters
+    as the darkest region (= tissue) and inflated the bbox to cover everything.
+    Here we paste a small tissue blob into a mostly-black canvas and assert the
+    bbox snaps to the blob, not the canvas.
+    """
+    canvas = np.zeros((400, 400, 3), dtype=np.uint8)  # mostly canvas-black
+    # One textured "tissue" tile at (200, 200) -- bright/varied, not pure black.
+    rng = np.random.default_rng(seed=42)
+    tile = rng.integers(60, 180, size=(60, 60, 3), dtype=np.uint8)
+    canvas[200:260, 200:260] = tile
+    bbox = detect_sample_bbox(canvas, min_area_frac=0.0001)
+    # Bbox should snap to the tile within a few pixels of morphological close.
+    assert 195 <= bbox.x0 <= 205 and 195 <= bbox.y0 <= 205
+    assert 255 <= bbox.x1 <= 268 and 255 <= bbox.y1 <= 268
+
+
 def test_accepts_rgb_array() -> None:
     gray = _blob_image(200, 200, y0=50, y1=150, x0=50, x1=150)
     rgb = np.stack([gray, gray, gray], axis=-1)  # H x W x 3

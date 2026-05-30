@@ -95,6 +95,11 @@ def detect_sample_bbox(
     image is discarded as a speck. The returned :class:`BBox` is the union of
     all surviving components.
 
+    If the overview comes from a stitched canvas with un-tiled gaps (pixels at
+    exactly RGB ``(0, 0, 0)``), those gaps are masked out before either cue is
+    computed -- otherwise the canvas black would be misread as dark tissue and
+    inflate the bbox to cover the whole canvas.
+
     ``image`` may be a path, a PIL image, or a NumPy array (HxW grayscale or
     HxWxC RGB). Raises :class:`SurveyError` if nothing above the area threshold
     is found, with guidance to check focus/exposure or pass a tighter ROI.
@@ -105,18 +110,27 @@ def detect_sample_bbox(
     from skimage.measure import label, regionprops
     from skimage.morphology import binary_closing, disk
 
-    gray = _to_grayscale_u8(image)
+    gray, canvas_mask = _to_grayscale_u8_with_canvas_mask(image)
     h, w = gray.shape
     if h == 0 or w == 0:
         raise SurveyError("overview image is empty")
 
-    # Intensity cue: tissue is darker. Otsu fails on a flat image (single value),
-    # so guard with a tiny dynamic-range check before calling it.
+    # Valid pixels = anything that isn't canvas-fill (RGB 0,0,0). For inputs
+    # without canvas gaps, every pixel is valid.
+    valid = ~canvas_mask
+    if not valid.any():
+        raise SurveyError("overview image has no valid (non-canvas) pixels")
+
+    # Intensity cue: tissue is darker. Otsu fails on a flat image (single
+    # value), so guard with a tiny dynamic-range check before calling it.
+    # Compute the threshold over valid pixels only (canvas black would otherwise
+    # pull Otsu's threshold and the dark mask down to nothing useful).
     intensity_mask = np.zeros_like(gray, dtype=bool)
-    if int(gray.max()) - int(gray.min()) >= 5:
+    valid_pixels = gray[valid]
+    if int(valid_pixels.max()) - int(valid_pixels.min()) >= 5:
         try:
-            t = threshold_otsu(gray)
-            intensity_mask = gray < t
+            t = threshold_otsu(valid_pixels)
+            intensity_mask = (gray < t) & valid
         except Exception:
             intensity_mask = np.zeros_like(gray, dtype=bool)
 
@@ -127,13 +141,16 @@ def detect_sample_bbox(
     win = max(3, int(variance_window) | 1)  # force odd, >= 3
     local_mean = uniform_filter(fimg, size=win)
     local_var = uniform_filter(fimg * fimg, size=win) - local_mean * local_mean
-    global_var = float(fimg.var())
+    global_var = float(fimg[valid].var()) if valid.any() else 0.0
     var_threshold = max(25.0, 0.1 * global_var)  # absolute floor handles flat backgrounds
-    texture_mask = local_var > var_threshold
+    texture_mask = (local_var > var_threshold) & valid
 
     mask = intensity_mask | texture_mask
     if close_radius > 0:
         mask = binary_closing(mask, disk(int(close_radius)))
+    # Closing can grow into the canvas region; clip back so detected components
+    # never include canvas pixels.
+    mask &= valid
 
     labelled = label(mask, connectivity=2)
     min_area = max(1, int(min_area_frac * h * w))
@@ -151,8 +168,16 @@ def detect_sample_bbox(
     return BBox(x0=int(x0), y0=int(y0), x1=int(x1), y1=int(y1))
 
 
-def _to_grayscale_u8(image: ImageInput) -> np.ndarray:
-    """Coerce ``image`` to an ``uint8`` 2-D grayscale array.
+def _to_grayscale_u8_with_canvas_mask(image: ImageInput) -> tuple[np.ndarray, np.ndarray]:
+    """Coerce ``image`` to an ``uint8`` grayscale array + canvas-fill mask.
+
+    The canvas mask is ``True`` wherever the input had all RGB channels at
+    exactly 0 -- the convention :func:`_stitch_overview_by_stage` and any
+    stitcher use for "no tile placed here." For inputs that are already
+    grayscale (or read from disk via ``Image.convert("L")``), the canvas mask
+    is all-``False``: we cannot distinguish real-black from canvas-black once
+    the colour information is gone, and a sample is never *all-zero* dark, so
+    treating it as "no canvas gaps" is safe.
 
     Accepts a path, PIL image, or NumPy array (grayscale or RGB / RGBA).
     Raises :class:`SurveyError` on unreadable paths or unsupported shapes.
@@ -160,25 +185,37 @@ def _to_grayscale_u8(image: ImageInput) -> np.ndarray:
     import numpy as np
     from PIL import Image, UnidentifiedImageError
 
+    def _from_rgb_array(rgb_arr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        canvas = (rgb_arr[..., 0] == 0) & (rgb_arr[..., 1] == 0) & (rgb_arr[..., 2] == 0)
+        f = rgb_arr.astype(np.float32)
+        gray = 0.299 * f[..., 0] + 0.587 * f[..., 1] + 0.114 * f[..., 2]
+        return np.clip(gray, 0, 255).astype(np.uint8), canvas
+
     if isinstance(image, (str, Path)):
         try:
             with Image.open(image) as im:
-                return np.asarray(im.convert("L"), dtype=np.uint8)
+                rgb = np.asarray(im.convert("RGB"), dtype=np.uint8)
         except (FileNotFoundError, UnidentifiedImageError, OSError) as exc:
             raise SurveyError(f"could not read overview image {image}: {exc}") from exc
+        return _from_rgb_array(rgb)
     if isinstance(image, Image.Image):
-        return np.asarray(image.convert("L"), dtype=np.uint8)
+        rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+        return _from_rgb_array(rgb)
     if isinstance(image, np.ndarray):
         arr = image
         if arr.ndim == 3:
-            # Drop alpha; use Rec. 601 luma weights for RGB -> gray.
-            rgb = arr[..., :3].astype(np.float32)
-            arr = (0.299 * rgb[..., 0] + 0.587 * rgb[..., 1] + 0.114 * rgb[..., 2])
-        elif arr.ndim != 2:
+            if arr.shape[-1] >= 3:
+                rgb = arr[..., :3]
+                if rgb.dtype != np.uint8:
+                    rgb = np.clip(rgb, 0, 255).astype(np.uint8)
+                return _from_rgb_array(rgb)
+            raise SurveyError(f"unsupported channel count {arr.shape[-1]}")
+        if arr.ndim != 2:
             raise SurveyError(f"unsupported image array shape {arr.shape}")
         if arr.dtype != np.uint8:
             arr = np.clip(arr, 0, 255).astype(np.uint8)
-        return arr
+        # No RGB available -> no way to distinguish canvas-black from real-dark.
+        return arr, np.zeros(arr.shape, dtype=bool)
     raise SurveyError(f"unsupported image type {type(image).__name__}")
 
 
