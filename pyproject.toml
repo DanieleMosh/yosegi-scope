@@ -13,6 +13,7 @@ dependencies = [
     "openflexure-microscope-client>=0.1.8",
     "openflexure-stitching>=0.2.5",
     "pillow>=9.5.0",
+    "scikit-image>=0.22",
     "typer>=0.25.1",
 ]
 
