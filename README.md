@@ -87,7 +87,7 @@ uv run yosegi run --host microscope.local --output mosaic.jpg
 # Automatic whole-slide survey: detect the sample boundary, plan and run the scan
 uv run yosegi run --auto --host microscope.local --output mosaic.jpg \
     --overview-rows 5 --overview-cols 5 \
-    --overview-step-x 8000 --overview-step-y 8000
+    --overview-step-x 2500 --overview-step-y 2500
 ```
 
 If `--host` is omitted, the microscope is discovered automatically via mDNS.

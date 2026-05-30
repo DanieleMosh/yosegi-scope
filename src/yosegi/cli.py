@@ -139,10 +139,16 @@ def run(
         5, "--overview-cols", min=1, help="Cols in the coarse overview raster (--auto only)."
     ),
     overview_step_x: int = typer.Option(
-        8000, "--overview-step-x", help="Stage steps between overview tiles in X (--auto only)."
+        2500,
+        "--overview-step-x",
+        help="Stage steps between overview tiles in X (--auto only). "
+             "Keep below the tile's stage span (~2700 on a 40x OpenFlexure) so the "
+             "overview canvas has no black gaps that confuse boundary detection.",
     ),
     overview_step_y: int = typer.Option(
-        8000, "--overview-step-y", help="Stage steps between overview tiles in Y (--auto only)."
+        2500,
+        "--overview-step-y",
+        help="Stage steps between overview tiles in Y (--auto only). See --overview-step-x.",
     ),
     min_area_frac: float = typer.Option(
         0.005,
