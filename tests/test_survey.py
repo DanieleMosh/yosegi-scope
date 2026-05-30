@@ -124,10 +124,14 @@ def test_plan_grid_respects_overlap() -> None:
         tile_size_px=(200, 200),
         overlap=0.2,
     )
-    # 200 * (1 - 0.2) = 160 step. 1000/160 = 6.25 -> 7 cols. 800/160 = 5 -> 5 rows.
+    # 200 * (1 - 0.2) = 160 step.
+    # cols: ceil((1000 - 200) / 160) + 1 = ceil(800/160) + 1 = 6  (covers [0, 1000])
+    # rows: ceil((800 - 200) / 160) + 1 = ceil(600/160) + 1 = 5
     assert plan.step_x == 160 and plan.step_y == 160
-    assert (plan.rows, plan.cols) == (5, 7)
+    assert (plan.rows, plan.cols) == (5, 6)
     assert plan.positions[0] == (5000, 6000)
+    # Last col anchor at c=5: 5000 + 5*160 = 5800; tile right edge: 5800+200 = 6000.
+    assert plan.positions[1] == (5160, 6000)
     assert plan.bbox_stage == BBox(5000, 6000, 6000, 6800)
 
 
@@ -147,6 +151,46 @@ def test_plan_grid_handles_rotated_csm() -> None:
     )
     assert (plan.rows, plan.cols) == (1, 1)
     assert len(plan.positions) == 1
+
+
+def test_plan_grid_rotated_csm_produces_image_space_overlap() -> None:
+    """Regression: a rotated CSM must produce stage steps that overlap *in image space*.
+
+    With a 90-deg rotated CSM the image's x-axis maps mostly to stage-y, so the
+    per-tile stage motion between camera-adjacent tiles is mostly along stage-y,
+    not stage-x. A previous version stepped along stage axes directly and
+    produced zero-overlap (disconnected) tiles on the real scope.
+    """
+    import numpy as np
+
+    csm = [[0.01, -4.4], [-4.37, 0.0]]
+    tw, th = 832, 624
+    # Bbox big enough that we'll plan a real 3x3 grid (3 tiles needed each way).
+    plan = plan_tile_grid(
+        BBox(0, 0, 3 * tw, 3 * th),
+        overview_origin_stage=(0, 0),
+        overview_csm=csm,
+        tile_size_px=(tw, th),
+        overlap=0.2,
+    )
+    assert plan.rows >= 2 and plan.cols >= 2
+    # Project the actual planned stage positions back into image space using the
+    # inverse CSM. Adjacent (camera-) col tiles should differ by ~tile_w * (1-overlap)
+    # in image-x and ~0 in image-y (NOT the other way round).
+    csm_arr = np.asarray(csm, dtype=float)
+    csm_inv = np.linalg.inv(csm_arr)
+    p0 = np.array(plan.positions[0])  # row 0, col 0
+    p1 = np.array(plan.positions[1])  # row 0, col 1 (snake order: same row, next col)
+    delta_px = csm_inv @ (p1 - p0)
+    # Expected step in image-x is ~tw * (1 - 0.2) = 665.6 pixels
+    expected_step = tw * (1.0 - 0.2)
+    assert abs(delta_px[0]) > 0.5 * expected_step, (
+        f"camera-col step has too little image-x motion: {delta_px[0]:.1f} px "
+        f"(expected ~{expected_step:.0f})"
+    )
+    assert abs(delta_px[1]) < 0.2 * th, (
+        f"camera-col step should not move much in image-y: got {delta_px[1]:.1f} px"
+    )
 
 
 def test_plan_grid_rejects_empty_bbox() -> None:

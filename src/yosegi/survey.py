@@ -216,49 +216,69 @@ def plan_tile_grid(
     if csm.shape != (2, 2):
         raise SurveyError(f"overview_csm must be a 2x2 matrix, got shape {csm.shape}")
 
-    # Project the bbox corners into stage space and take their axis-aligned span.
-    # csm maps pixel deltas (dx, dy) -> stage deltas (dsx, dsy).
+    # Plan the grid in image (pixel) space, where "overlap" is naturally
+    # meaningful and the camera axes are aligned with the tile edges. Each tile
+    # covers `tw x th` pixels in the bbox's coordinate frame; the per-tile
+    # stride is `tile_size * (1 - overlap)` pixels. We then convert each tile's
+    # origin from pixels to absolute stage coordinates via the CSM.
+    #
+    # This is critical when the CSM is rotated (e.g. ~90 degrees on
+    # OpenFlexure): the image-x axis maps mostly to stage-y, so a single
+    # camera-horizontal step requires moving the stage in y, not x. Computing
+    # the stride in stage axes directly (as a previous version did) gives
+    # tiles that are arranged along the wrong stage axis and never overlap.
+    bbox_w = bbox.x1 - bbox.x0
+    bbox_h = bbox.y1 - bbox.y0
+    step_px_x = max(1.0, tw * (1.0 - overlap))
+    step_px_y = max(1.0, th * (1.0 - overlap))
+    cols = max(1, int(np.ceil(max(0, bbox_w - tw) / step_px_x)) + 1) if bbox_w > tw else 1
+    rows = max(1, int(np.ceil(max(0, bbox_h - th) / step_px_y)) + 1) if bbox_h > th else 1
+
+    # Convert per-step pixel motion to stage-step motion via the CSM. These
+    # are 2-vectors -- one full vector per axis -- because a single image-axis
+    # step in general moves the stage in BOTH x and y.
+    col_step_stage = csm @ np.array([step_px_x, 0.0])
+    row_step_stage = csm @ np.array([0.0, step_px_y])
+    if np.allclose(col_step_stage, 0) or np.allclose(row_step_stage, 0):
+        raise SurveyError("CSM projects a step to zero stage motion -- check overview_csm")
+
+    ox, oy = overview_origin_stage
+    # First tile's image-space origin is bbox.(x0, y0); stage origin is the
+    # CSM-projected point relative to the overview's stage anchor.
+    bbox_origin_stage = csm @ np.array([bbox.x0, bbox.y0])
+    origin_stage_x = ox + bbox_origin_stage[0]
+    origin_stage_y = oy + bbox_origin_stage[1]
+
+    positions: list[tuple[int, int]] = []
+    for r in range(rows):
+        col_iter = range(cols) if r % 2 == 0 else range(cols - 1, -1, -1)
+        for c in col_iter:
+            stage = (
+                origin_stage_x + c * col_step_stage[0] + r * row_step_stage[0],
+                origin_stage_y + c * col_step_stage[1] + r * row_step_stage[1],
+            )
+            positions.append((int(round(stage[0])), int(round(stage[1]))))
+
+    # bbox in stage coords: project all four pixel corners and take the axis-aligned span.
     corners_px = np.array(
         [[bbox.x0, bbox.y0], [bbox.x1, bbox.y0], [bbox.x1, bbox.y1], [bbox.x0, bbox.y1]],
         dtype=float,
     )
-    corners_stage = corners_px @ csm.T  # apply affine to each corner
+    corners_stage = corners_px @ csm.T
     sx_min, sy_min = corners_stage.min(axis=0)
     sx_max, sy_max = corners_stage.max(axis=0)
-    span_x = sx_max - sx_min
-    span_y = sy_max - sy_min
-
-    # Stage extent of one tile = axis-aligned span of (tw, th) projected through csm.
-    tile_corners = np.array([[0, 0], [tw, 0], [tw, th], [0, th]], dtype=float) @ csm.T
-    tile_span_x = float(tile_corners[:, 0].max() - tile_corners[:, 0].min())
-    tile_span_y = float(tile_corners[:, 1].max() - tile_corners[:, 1].min())
-    if tile_span_x <= 0 or tile_span_y <= 0:
-        raise SurveyError("CSM projects the tile to zero stage extent -- check overview_csm")
-
-    step_x = tile_span_x * (1.0 - overlap)
-    step_y = tile_span_y * (1.0 - overlap)
-    cols = max(1, int(np.ceil(span_x / step_x))) if span_x > tile_span_x else 1
-    rows = max(1, int(np.ceil(span_y / step_y))) if span_y > tile_span_y else 1
-
-    ox, oy = overview_origin_stage
-    # Anchor the grid so the first tile's stage origin is the projected bbox corner.
-    origin_x = ox + sx_min
-    origin_y = oy + sy_min
-
-    positions: list[tuple[int, int]] = []
-    for r in range(rows):
-        row_range = range(cols) if r % 2 == 0 else range(cols - 1, -1, -1)
-        for c in row_range:
-            positions.append(
-                (int(round(origin_x + c * step_x)), int(round(origin_y + r * step_y)))
-            )
-
     bbox_stage = BBox(
         x0=int(round(ox + sx_min)),
         y0=int(round(oy + sy_min)),
         x1=int(round(ox + sx_max)),
         y1=int(round(oy + sy_max)),
     )
+
+    # step_x / step_y are reported as the magnitude (Euclidean) of the per-axis
+    # stage motion so callers logging "step" see a single sensible number even
+    # when the move is diagonal in stage space.
+    step_x = float(np.hypot(*col_step_stage))
+    step_y = float(np.hypot(*row_step_stage))
     return ScanPlan(
         positions=positions,
         rows=rows,
