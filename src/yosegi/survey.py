@@ -190,6 +190,78 @@ def plan_tile_grid(
 ) -> ScanPlan:
     """Plan a snake-ordered scan that covers ``bbox`` at the working magnification.
 
-    Stub -- implementation lands in the next commit.
+    The bounding box is given in *overview* pixels. ``overview_origin_stage`` is
+    the absolute stage ``(x, y)`` (in steps) corresponding to overview pixel
+    ``(0, 0)``, and ``overview_csm`` is the camera-stage-mapping matrix used
+    for that overview (``stage_delta = csm @ pixel_delta``). For each axis the
+    pixel-space bbox is projected into stage space, the per-tile stage motion
+    is derived from ``tile_size_px`` and ``overlap``, and a snake-ordered grid
+    of absolute stage positions is generated.
+
+    Raises :class:`SurveyError` on invalid inputs (empty bbox, non-positive
+    tile size, overlap not in ``[0, 1)``, or a degenerate CSM).
     """
-    raise NotImplementedError
+    import numpy as np
+
+    if bbox.is_empty:
+        raise SurveyError("cannot plan a scan over an empty bounding box")
+    tw, th = tile_size_px
+    if tw <= 0 or th <= 0:
+        raise SurveyError(f"tile_size_px must be positive, got {tile_size_px!r}")
+    if not 0.0 <= overlap < 1.0:
+        raise SurveyError(f"overlap must be in [0, 1), got {overlap!r}")
+    csm = np.asarray(overview_csm, dtype=float)
+    if csm.shape != (2, 2):
+        raise SurveyError(f"overview_csm must be a 2x2 matrix, got shape {csm.shape}")
+
+    # Project the bbox corners into stage space and take their axis-aligned span.
+    # csm maps pixel deltas (dx, dy) -> stage deltas (dsx, dsy).
+    corners_px = np.array(
+        [[bbox.x0, bbox.y0], [bbox.x1, bbox.y0], [bbox.x1, bbox.y1], [bbox.x0, bbox.y1]],
+        dtype=float,
+    )
+    corners_stage = corners_px @ csm.T  # apply affine to each corner
+    sx_min, sy_min = corners_stage.min(axis=0)
+    sx_max, sy_max = corners_stage.max(axis=0)
+    span_x = sx_max - sx_min
+    span_y = sy_max - sy_min
+
+    # Stage extent of one tile = axis-aligned span of (tw, th) projected through csm.
+    tile_corners = np.array([[0, 0], [tw, 0], [tw, th], [0, th]], dtype=float) @ csm.T
+    tile_span_x = float(tile_corners[:, 0].max() - tile_corners[:, 0].min())
+    tile_span_y = float(tile_corners[:, 1].max() - tile_corners[:, 1].min())
+    if tile_span_x <= 0 or tile_span_y <= 0:
+        raise SurveyError("CSM projects the tile to zero stage extent -- check overview_csm")
+
+    step_x = tile_span_x * (1.0 - overlap)
+    step_y = tile_span_y * (1.0 - overlap)
+    cols = max(1, int(np.ceil(span_x / step_x))) if span_x > tile_span_x else 1
+    rows = max(1, int(np.ceil(span_y / step_y))) if span_y > tile_span_y else 1
+
+    ox, oy = overview_origin_stage
+    # Anchor the grid so the first tile's stage origin is the projected bbox corner.
+    origin_x = ox + sx_min
+    origin_y = oy + sy_min
+
+    positions: list[tuple[int, int]] = []
+    for r in range(rows):
+        row_range = range(cols) if r % 2 == 0 else range(cols - 1, -1, -1)
+        for c in row_range:
+            positions.append(
+                (int(round(origin_x + c * step_x)), int(round(origin_y + r * step_y)))
+            )
+
+    bbox_stage = BBox(
+        x0=int(round(ox + sx_min)),
+        y0=int(round(oy + sy_min)),
+        x1=int(round(ox + sx_max)),
+        y1=int(round(oy + sy_max)),
+    )
+    return ScanPlan(
+        positions=positions,
+        rows=rows,
+        cols=cols,
+        step_x=int(round(step_x)),
+        step_y=int(round(step_y)),
+        bbox_stage=bbox_stage,
+    )
