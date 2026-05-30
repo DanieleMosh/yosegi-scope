@@ -168,13 +168,83 @@ def fetch_tiles(
     csm = _get_csm(scope, calibrate)
 
     start = dict(scope.position)
+    # Translate the snake-grid into the absolute (row, col, x, y) plan that
+    # the position-list helper consumes -- step relative to ``start`` so the
+    # grid is anchored at the scope's current stage position.
+    plan: list[tuple[int, int, int, int]] = [
+        (r, c, start["x"] + c * step_x, start["y"] + r * step_y)
+        for r, c in snake_cells(rows, cols)
+    ]
+    tiles = _capture_at_plan(scope, out_dir, plan, autofocus=autofocus, csm=csm)
+
+    scope.move(start, absolute=True)
+    _write_manifest(out_dir, rows, cols, step_x, step_y, overlap, autofocus, start, csm, tiles)
+    return tiles
+
+
+def fetch_tiles_at_positions(
+    client: Microscope,
+    out_dir: Path,
+    positions: list[tuple[int, int]],
+    *,
+    rows: int,
+    cols: int,
+    autofocus: bool = False,
+    calibrate: bool = False,
+) -> list[Tile]:
+    """Capture one tile at each absolute stage ``(x, y)`` in ``positions``.
+
+    Used by the auto-survey pipeline to execute a :class:`~yosegi.survey.ScanPlan`
+    that was computed from a detected bounding box. ``positions`` is assumed to
+    cover a ``rows x cols`` snake-ordered grid (the planner's output); the
+    ``(row, col)`` for each position is derived from its index so EXIF and
+    filenames stay consistent with ``fetch_tiles``. The scope returns to its
+    starting position when done. Pass ``calibrate=True`` to run camera-stage
+    mapping when the scope has none stored.
+    """
+    if rows < 1 or cols < 1:
+        raise AcquisitionError("rows and cols must be >= 1")
+    if len(positions) != rows * cols:
+        raise AcquisitionError(
+            f"positions has {len(positions)} entries but rows*cols = {rows * cols}"
+        )
+
+    out_dir = Path(out_dir)
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise AcquisitionError(f"Could not create output directory {out_dir}: {exc}") from exc
+
+    csm = _get_csm(client, calibrate)
+    start = dict(client.position)
+
+    snake = list(snake_cells(rows, cols))
+    plan = [(r, c, x, y) for (r, c), (x, y) in zip(snake, positions, strict=True)]
+    tiles = _capture_at_plan(client, out_dir, plan, autofocus=autofocus, csm=csm)
+    client.move(start, absolute=True)
+    return tiles
+
+
+def _capture_at_plan(
+    scope: Microscope,
+    out_dir: Path,
+    plan: list[tuple[int, int, int, int]],
+    *,
+    autofocus: bool,
+    csm: list[list[float]] | None,
+) -> list[Tile]:
+    """Walk ``plan`` of ``(row, col, abs_x, abs_y)`` and capture one tile per entry.
+
+    Uses ``move_rel`` between steps so the scope incurs only the per-step travel,
+    not the cumulative distance from the origin. Shared by both ``fetch_tiles``
+    (regular snake grid) and ``fetch_tiles_at_positions`` (planned scan).
+    """
     tiles: list[Tile] = []
     prev: tuple[int, int] | None = None
-
-    for row, col in snake_cells(rows, cols):
+    for row, col, abs_x, abs_y in plan:
         if prev is not None:
-            dx = (col - prev[1]) * step_x
-            dy = (row - prev[0]) * step_y
+            dx = abs_x - prev[0]
+            dy = abs_y - prev[1]
             if dx or dy:
                 scope.move_rel({"x": dx, "y": dy, "z": 0})
         if autofocus:
@@ -194,10 +264,7 @@ def fetch_tiles(
                 stage_z=pos.get("z"),
             )
         )
-        prev = (row, col)
-
-    scope.move(start, absolute=True)
-    _write_manifest(out_dir, rows, cols, step_x, step_y, overlap, autofocus, start, csm, tiles)
+        prev = (abs_x, abs_y)
     return tiles
 
 
