@@ -14,10 +14,11 @@ is cleaned with **image post-processing**, a model performs **brightfield →
 fluorescence** translation, and the whole thing is exposed as an **API** behind a
 web **front end**. See the [Roadmap](#roadmap).
 
-> **Status:** acquisition and stitching both work — `acquire` rasters a grid and
-> saves tiles + manifest, and `stitch` aligns and merges them into a composite.
-> Sample-boundary detection (the planning half of the automatic whole-slide
-> survey) has just landed in `survey.py`; it isn't wired into the CLI yet.
+> **Status:** the automatic whole-slide survey works end-to-end. `yosegi run
+> --auto` captures a coarse overview, detects the sample boundary, plans a
+> high-resolution scan over it, runs that scan, and stitches the final mosaic —
+> no manually specified grid required. The manual `acquire` and `stitch`
+> commands are unchanged.
 
 ![Example stitched mosaic](docs/example_mosaic.jpg)
 
@@ -37,6 +38,10 @@ so the cell structure stays continuous across seams.*
   scaling) and refines with high-pass phase correlation + a least-squares global
   optimisation. `--no-correlate` does stage+affine placement only, which is reliable
   on faint samples where correlation can't connect tiles.
+- **Survey (`--auto`)** — coarse overview pass, classical segmentation (Otsu
+  intensity + local variance + morphological close) to find the sample
+  boundary, plan a high-resolution snake-ordered scan over it, then execute
+  and stitch. No manual `--rows`/`--cols` required.
 - **Post-process** *(next)* — standard techniques to make the composite cleaner and
   more accurate: flat-field / illumination correction to remove vignetting, seam
   exposure blending so tile edges disappear, white balance / contrast normalisation,
@@ -78,6 +83,11 @@ uv run yosegi stitch --input ./tiles --output mosaic.jpg --no-correlate
 
 # Acquire then stitch in one pass
 uv run yosegi run --host microscope.local --output mosaic.jpg
+
+# Automatic whole-slide survey: detect the sample boundary, plan and run the scan
+uv run yosegi run --auto --host microscope.local --output mosaic.jpg \
+    --overview-rows 5 --overview-cols 5 \
+    --overview-step-x 8000 --overview-step-y 8000
 ```
 
 If `--host` is omitted, the microscope is discovered automatically via mDNS.
@@ -107,26 +117,24 @@ Done:
 - [x] CI (ruff + pytest).
 - [x] **Sample boundary detection** in `survey.py` — `detect_sample_bbox`
   (Otsu intensity + local variance + morphological close) and `plan_tile_grid`
-  (snake-ordered absolute stage positions over the detected bbox). Not yet
-  wired to the CLI: still consumed by a follow-up `acquire --auto`.
+  (snake-ordered absolute stage positions over the detected bbox).
+- [x] **Automatic whole-slide survey end-to-end** behind `yosegi run --auto` —
+  coarse overview pass, detect, plan, run the high-res scan, stitch.
 
-**Now — automatic whole-slide survey (wiring).** Add a coarse low-magnification
-overview pass to `acquire`, feed it through `survey.detect_sample_bbox` +
-`plan_tile_grid`, and run the resulting `ScanPlan` as a high-resolution scan —
-all behind a single `acquire --auto` (no user-supplied `--rows`/`--cols`).
+**Now — post-processing.** Apply standard techniques to the stitched composite for a
+cleaner result: flat-field / illumination correction, seam exposure blending,
+white-balance and contrast normalisation, and optional denoising. Goal: a
+mosaic with no visible tile seams or vignetting.
 
 Planned, in order:
 
-1. **Post-processing.** Apply standard techniques to the stitched composite for a
-   cleaner result: flat-field / illumination correction, seam exposure blending,
-   white-balance and contrast normalisation, and optional denoising.
-2. **Brightfield → fluorescence.** A deep-learning model performs virtual staining /
+1. **Brightfield → fluorescence.** A deep-learning model performs virtual staining /
    modality translation from the brightfield mosaic to a fluorescence-like image,
    surfacing structure that brightfield alone doesn't show.
-3. **API.** Wrap acquisition, stitching, post-processing, survey, and inference behind
+2. **API.** Wrap acquisition, stitching, post-processing, survey, and inference behind
    a typed service (FastAPI + Pydantic models) so the pipeline can be driven
    programmatically and remotely.
-4. **Front end.** A web UI on top of the API to launch scans, watch progress, and
+3. **Front end.** A web UI on top of the API to launch scans, watch progress, and
    browse/zoom the resulting mosaics.
 
 ## License
