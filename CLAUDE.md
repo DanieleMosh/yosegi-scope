@@ -35,6 +35,9 @@ service → a web **front end**.
 
 - `src/yosegi/acquire.py` — drive the scope, raster the grid, write tiles + manifest.
 - `src/yosegi/stitch.py` — place tiles into a mosaic (coordinates by default).
+- `src/yosegi/survey.py` — detect the sample boundary in an overview, plan a
+  snake-ordered scan over it. Not wired into the CLI yet; consumed by the
+  future `acquire --auto`.
 - `src/yosegi/cli.py` — Typer app: `acquire`, `stitch`, `run`.
 - `src/yosegi/models.py` — `Tile`, `MosaicResult` dataclasses.
 - `tests/` — pytest; hardware is faked, so no scope is needed to run them.
@@ -128,13 +131,15 @@ which is how tests run without hardware.
 
 Where the project is headed (each is a separate future effort, not yet built):
 
-1. **Post-processing** *(next)* — flat-field/illumination correction, seam exposure
+1. **Automatic whole-slide survey** *(in progress)* — detect the **sample
+   boundary** (low-mag overview + thresholding/segmentation: tissue vs empty
+   slide), then plan a scan that covers the whole sample with overlap. Will
+   replace the user-supplied `--rows`/`--cols` grid in `acquire`. The detection
+   half is in `survey.py` (`detect_sample_bbox`, `plan_tile_grid`); the
+   overview-acquisition and `acquire --auto` wiring are a follow-up.
+2. **Post-processing** — flat-field/illumination correction, seam exposure
    blending, white-balance/contrast normalisation, optional denoising. Likely a new
    `postprocess.py` step applied to (or within) the stitch output.
-2. **Automatic whole-slide survey** — detect the **sample boundary** (low-mag
-   overview + thresholding/segmentation: tissue vs empty slide), then plan a scan
-   that covers the whole sample with overlap. Replaces the user-supplied `--rows`/
-   `--cols` grid in `acquire`.
 3. **Brightfield → fluorescence** — a deep-learning model for virtual staining /
    modality translation on the mosaic. New inference module + model dependency.
 4. **API** — wrap acquire/stitch/postprocess/survey/inference behind **FastAPI +

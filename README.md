@@ -16,7 +16,8 @@ web **front end**. See the [Roadmap](#roadmap).
 
 > **Status:** acquisition and stitching both work — `acquire` rasters a grid and
 > saves tiles + manifest, and `stitch` aligns and merges them into a composite.
-> Image post-processing is the next step; see the roadmap for what follows.
+> Sample-boundary detection (the planning half of the automatic whole-slide
+> survey) has just landed in `survey.py`; it isn't wired into the CLI yet.
 
 ![Example stitched mosaic](docs/example_mosaic.jpg)
 
@@ -104,19 +105,21 @@ Done:
 - [x] Acquisition raster (XY grid, autofocus, capture) — `acquire.py`.
 - [x] Stitching via `openflexure-stitching` (EXIF stage coords + CSM affine matrix).
 - [x] CI (ruff + pytest).
+- [x] **Sample boundary detection** in `survey.py` — `detect_sample_bbox`
+  (Otsu intensity + local variance + morphological close) and `plan_tile_grid`
+  (snake-ordered absolute stage positions over the detected bbox). Not yet
+  wired to the CLI: still consumed by a follow-up `acquire --auto`.
 
-**Now — post-processing.** Apply standard techniques to the stitched composite for a
-cleaner, more accurate result: flat-field/illumination correction, seam exposure
-blending, white-balance and contrast normalisation, and optional denoising. Goal: a
-mosaic with no visible tile seams or vignetting.
+**Now — automatic whole-slide survey (wiring).** Add a coarse low-magnification
+overview pass to `acquire`, feed it through `survey.detect_sample_bbox` +
+`plan_tile_grid`, and run the resulting `ScanPlan` as a high-resolution scan —
+all behind a single `acquire --auto` (no user-supplied `--rows`/`--cols`).
 
 Planned, in order:
 
-1. **Automatic whole-slide survey.** Instead of a user-defined N×N grid, the scope
-   first detects the **sample boundary** (e.g. a low-magnification overview +
-   thresholding/segmentation to find tissue vs empty slide), then plans and runs a
-   scan that covers the whole sample with adequate overlap. Output: a complete mosaic
-   of the slide with no manual grid sizing.
+1. **Post-processing.** Apply standard techniques to the stitched composite for a
+   cleaner result: flat-field / illumination correction, seam exposure blending,
+   white-balance and contrast normalisation, and optional denoising.
 2. **Brightfield → fluorescence.** A deep-learning model performs virtual staining /
    modality translation from the brightfield mosaic to a fluorescence-like image,
    surfacing structure that brightfield alone doesn't show.
