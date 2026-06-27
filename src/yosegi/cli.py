@@ -62,6 +62,12 @@ def acquire(
     autofocus: bool = typer.Option(
         True, "--autofocus/--no-autofocus", help="Autofocus at each tile before capture."
     ),
+    autofocus_once: bool = typer.Option(
+        False,
+        "--autofocus-once",
+        help="Autofocus only on the first tile and reuse that focus for the rest "
+             "(faster on flat samples). Ignored if --autofocus is on; pair with --no-autofocus.",
+    ),
     overlap: float = typer.Option(0.2, "--overlap", help="Fractional tile overlap (metadata only)."),
 ) -> None:
     """Scan a sample and fetch overlapping tiles from the microscope."""
@@ -76,6 +82,7 @@ def acquire(
             step_x=step_x,
             step_y=step_y,
             autofocus=autofocus,
+            autofocus_once=autofocus_once,
             overlap=overlap,
         )
     except AcquisitionError as exc:
@@ -158,6 +165,12 @@ def run(
     autofocus: bool = typer.Option(
         True, "--autofocus/--no-autofocus", help="Autofocus at each tile before capture."
     ),
+    autofocus_once: bool = typer.Option(
+        False,
+        "--autofocus-once",
+        help="Autofocus only on the first tile and reuse that focus for the rest "
+             "(faster on flat samples). Ignored if --autofocus is on; pair with --no-autofocus.",
+    ),
     overlap: float = typer.Option(0.2, "--overlap", help="Fractional tile overlap (metadata only)."),
     correlate: bool = typer.Option(
         True, "--correlate/--no-correlate", help="Refine placement with phase correlation (vs stage-only)."
@@ -191,6 +204,7 @@ def run(
                 overview_step_y=overview_step_y,
                 overlap=overlap,
                 autofocus=autofocus,
+                autofocus_once=autofocus_once,
                 correlate=correlate,
                 high_pass_sigma=high_pass_sigma,
                 minimum_overlap=minimum_overlap,
@@ -206,6 +220,7 @@ def run(
                 step_x=step_x,
                 step_y=step_y,
                 autofocus=autofocus,
+                autofocus_once=autofocus_once,
                 overlap=overlap,
             )
             result = stitch_tiles(

@@ -336,6 +336,7 @@ def run_auto_survey(
     overview_step_y: int = 2500,
     overlap: float = 0.2,
     autofocus: bool = True,
+    autofocus_once: bool = False,
     correlate: bool = True,
     high_pass_sigma: float = 10.0,
     minimum_overlap: float = 0.2,
@@ -383,6 +384,7 @@ def run_auto_survey(
         step_x=overview_step_x,
         step_y=overview_step_y,
         autofocus=autofocus,
+        autofocus_once=autofocus_once,
         overlap=overlap,
         calibrate=True,
         client=client,
@@ -433,6 +435,7 @@ def run_auto_survey(
         rows=plan.rows,
         cols=plan.cols,
         autofocus=autofocus,
+        autofocus_once=autofocus_once,
     )
 
     # Stage 6: final stitch.
