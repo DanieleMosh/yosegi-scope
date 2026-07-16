@@ -226,11 +226,20 @@ def fetch_tiles_at_positions(
 
     snake = list(snake_cells(rows, cols))
     plan = [(r, c, x, y) for (r, c), (x, y) in zip(snake, positions, strict=True)]
+
+    # _capture_at_plan skips the move before its first entry (correct for
+    # fetch_tiles, whose plan[0] is the current position). Here plan[0] is an
+    # arbitrary absolute target, so move there first -- otherwise the whole scan
+    # is captured offset by (start - positions[0]) and images the wrong region.
+    first_x, first_y = positions[0]
+    client.move({"x": int(first_x), "y": int(first_y), "z": start["z"]}, absolute=True)
+
     tiles = _capture_at_plan(
         client, out_dir, plan,
         autofocus=autofocus, autofocus_once=autofocus_once, csm=csm,
     )
     client.move(start, absolute=True)
+    _write_positions_manifest(out_dir, rows, cols, positions, autofocus, start, csm, tiles)
     return tiles
 
 
@@ -302,18 +311,52 @@ def _write_manifest(
         "autofocus": autofocus,
         "camera_stage_mapping": csm,
         "start_position": start,
-        "tiles": [
-            {
-                "filename": t.path.name,
-                "row": t.row,
-                "col": t.col,
-                "stage_x": t.stage_x,
-                "stage_y": t.stage_y,
-                "stage_z": t.stage_z,
-            }
-            for t in tiles
-        ],
+        "tiles": [_tile_record(t) for t in tiles],
     }
     path = out_dir / "manifest.json"
     path.write_text(json.dumps(manifest, indent=2))
     return path
+
+
+def _write_positions_manifest(
+    out_dir: Path,
+    rows: int,
+    cols: int,
+    positions: list[tuple[int, int]],
+    autofocus: bool,
+    start: dict[str, int],
+    csm: list[list[float]] | None,
+    tiles: list[Tile],
+) -> Path:
+    """Write the handoff manifest for a planned-position scan.
+
+    Same ``yosegi.acquire/1`` schema as :func:`_write_manifest` so ``stitch_tiles``
+    can read the CSM from it, but records the planned ``grid`` extent and the
+    absolute target positions instead of a fixed step, since a planned scan may be
+    sparse (fewer tiles than ``rows * cols`` once empty tiles are skipped).
+    """
+    manifest = {
+        "schema": "yosegi.acquire/1",
+        "tool_version": __version__,
+        "grid": {"rows": rows, "cols": cols},
+        "planned_positions": [[int(x), int(y)] for x, y in positions],
+        "autofocus": autofocus,
+        "camera_stage_mapping": csm,
+        "start_position": start,
+        "tiles": [_tile_record(t) for t in tiles],
+    }
+    path = out_dir / "manifest.json"
+    path.write_text(json.dumps(manifest, indent=2))
+    return path
+
+
+def _tile_record(t: Tile) -> dict[str, Any]:
+    """Serialise one :class:`Tile` for a manifest's ``tiles`` list."""
+    return {
+        "filename": t.path.name,
+        "row": t.row,
+        "col": t.col,
+        "stage_x": t.stage_x,
+        "stage_y": t.stage_y,
+        "stage_z": t.stage_z,
+    }

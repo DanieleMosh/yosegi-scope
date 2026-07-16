@@ -32,6 +32,24 @@ class SurveyError(RuntimeError):
     """Raised when a slide cannot be surveyed (no sample, bad inputs)."""
 
 
+def _csm_from_manifest(manifest_path: Path) -> list[list[float]] | None:
+    """Return the CSM matrix from an acquire manifest, or ``None`` if absent.
+
+    Reads defensively: a missing file or unparseable JSON returns ``None`` rather
+    than raising, so the caller can convert "no calibration" into a clean
+    :class:`SurveyError` instead of leaking a ``FileNotFoundError`` /
+    ``JSONDecodeError`` past the CLI's error normalisation.
+    """
+    import json
+
+    try:
+        manifest = json.loads(Path(manifest_path).read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    csm = manifest.get("camera_stage_mapping")
+    return csm if csm else None
+
+
 @dataclass(frozen=True)
 class BBox:
     """Pixel bounding box in an overview image.
@@ -389,13 +407,11 @@ def run_auto_survey(
     if not overview_tiles:
         raise AcquisitionError("overview pass produced no tiles")
 
-    # Pull the CSM that ``acquire`` just embedded. Read it back from the
-    # manifest rather than the scope so we are guaranteed to use the same
-    # matrix the stitcher would see.
-    import json as _json
-
-    manifest = _json.loads((overview_dir / "manifest.json").read_text())
-    csm = manifest.get("camera_stage_mapping")
+    # Pull the CSM that ``acquire`` just embedded. Read it from the manifest
+    # ``fetch_tiles`` wrote (same matrix the stitcher will see); guard the read
+    # so a missing/corrupt manifest surfaces as a SurveyError, not a raw
+    # traceback that escapes the CLI's error normalisation.
+    csm = _csm_from_manifest(overview_dir / "manifest.json")
     if csm is None:
         raise SurveyError(
             "scope has no camera-stage-mapping calibration; run calibrate_xy() on the "

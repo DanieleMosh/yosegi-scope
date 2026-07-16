@@ -171,7 +171,12 @@ def run(
         help="Autofocus only on the first tile and reuse that focus for the rest "
              "(faster on flat samples). Ignored if --autofocus is on; pair with --no-autofocus.",
     ),
-    overlap: float = typer.Option(0.2, "--overlap", help="Fractional tile overlap (metadata only)."),
+    overlap: float = typer.Option(
+        0.2,
+        "--overlap",
+        help="Fractional tile overlap. Metadata only for a manual scan; with --auto it "
+             "sets the high-res tile spacing (more overlap = more tiles).",
+    ),
     correlate: bool = typer.Option(
         True, "--correlate/--no-correlate", help="Refine placement with phase correlation (vs stage-only)."
     ),

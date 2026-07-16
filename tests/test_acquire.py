@@ -6,7 +6,12 @@ from pathlib import Path
 import PIL.Image
 import pytest
 
-from yosegi.acquire import AcquisitionError, fetch_tiles, snake_cells
+from yosegi.acquire import (
+    AcquisitionError,
+    fetch_tiles,
+    fetch_tiles_at_positions,
+    snake_cells,
+)
 
 
 class FakeMicroscope:
@@ -175,3 +180,57 @@ def test_no_calibration_when_disabled(tmp_path: Path) -> None:
         calibrate=False, client=scope,
     )
     assert scope.calibrate_calls == 0
+
+
+# --- fetch_tiles_at_positions ----------------------------------------------
+
+
+def test_positions_scan_captures_at_the_planned_positions(tmp_path: Path) -> None:
+    """Regression: the first tile must be captured AT positions[0], not at the
+    scope's current location.
+
+    _capture_at_plan skips the move before its first entry (right for
+    fetch_tiles, where plan[0] == current position). For an arbitrary planned
+    scan the scope may be parked far away (e.g. the overview start), so without
+    an explicit move to positions[0] every tile is offset and the scan images
+    the wrong region. Here the scope starts at (1000, 2000) but the plan begins
+    at (5000, 6000): the captured positions must equal the plan exactly.
+    """
+    scope = FakeMicroscope(start=(1000, 2000, 3000))
+    positions = [(5000, 6000), (5100, 6000), (5100, 6100), (5000, 6100)]
+    tiles = fetch_tiles_at_positions(
+        client=scope, out_dir=tmp_path, positions=positions,
+        rows=2, cols=2, autofocus=False,
+    )
+    assert scope.visited == positions
+    # (row, col) are derived from snake order over the 2x2 grid.
+    by_rc = {(t.row, t.col): (t.stage_x, t.stage_y) for t in tiles}
+    assert by_rc[(0, 0)] == (5000, 6000)
+    assert by_rc[(0, 1)] == (5100, 6000)
+    assert by_rc[(1, 1)] == (5100, 6100)
+    assert by_rc[(1, 0)] == (5000, 6100)
+    # Scope returned home afterwards.
+    assert scope.position == {"x": 1000, "y": 2000, "z": 3000}
+
+
+def test_positions_scan_writes_manifest(tmp_path: Path) -> None:
+    scope = FakeMicroscope(start=(0, 0, 0), csm=_CSM)
+    positions = [(10, 20), (30, 20)]
+    fetch_tiles_at_positions(
+        client=scope, out_dir=tmp_path, positions=positions,
+        rows=1, cols=2, autofocus=False,
+    )
+    manifest = json.loads((tmp_path / "manifest.json").read_text())
+    assert manifest["schema"] == "yosegi.acquire/1"
+    assert manifest["grid"] == {"rows": 1, "cols": 2}
+    assert manifest["planned_positions"] == [[10, 20], [30, 20]]
+    assert manifest["camera_stage_mapping"] == _CSM
+    assert len(manifest["tiles"]) == 2
+
+
+def test_positions_scan_rejects_length_mismatch(tmp_path: Path) -> None:
+    scope = FakeMicroscope()
+    with pytest.raises(AcquisitionError, match="positions has"):
+        fetch_tiles_at_positions(
+            client=scope, out_dir=tmp_path, positions=[(0, 0)], rows=2, cols=2,
+        )

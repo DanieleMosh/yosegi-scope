@@ -114,7 +114,9 @@ detected bbox.
 
 Omit `--host` for mDNS auto-discovery. `--autofocus` is on by default
 (`--no-autofocus` to skip). `--step-x`/`--step-y` are in **stage steps**;
-`--overlap` is metadata only. Errors print a one-line `Error:` and exit 1 (no
+`--overlap` is metadata only for a manual scan, but with `--auto` it sets the
+high-res tile spacing (`plan_tile_grid` strides by `tile_size * (1 - overlap)`),
+so more overlap means more tiles. Errors print a one-line `Error:` and exit 1 (no
 traceback).
 
 ## Library
