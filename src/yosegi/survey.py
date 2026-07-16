@@ -1,14 +1,28 @@
-"""Detect the sample boundary in a low-magnification overview, plan a fine scan.
+"""Detect tissue regions in a low-magnification overview, plan a fine scan.
 
 This module is the *automatic whole-slide survey*: given a way to drive the
 scope, it captures a coarse overview pass, segments tissue vs empty slide on
-the overview, plans a fine-magnification scan over the detected region, runs
-it, and stitches the result.
+the overview, plans a fine-magnification scan **only over the tissue** (skipping
+empty area), runs it, and stitches the result.
 
-Segmentation is classical (Otsu intensity + local variance + morphological
-close) so there is no ML dependency: tissue is darker and more textured than
-the empty slide. Errors are normalised into :class:`SurveyError` to match
-``AcquisitionError`` / ``StitchError``.
+Segmentation is classical (no ML dependency): tissue is separated from the empty
+slide by three complementary cues combined into one boolean mask --
+
+* **saturation** -- stained tissue is coloured while glass is near-grey, so a
+  high saturation channel is the cleanest tissue cue (the CLAM / digital-
+  pathology approach). Weak on faint / unstained brightfield samples, so it is
+  backed by:
+* **intensity** -- tissue is darker than the bright background (Otsu), and
+* **texture** -- tissue is textured while the background is flat (local variance).
+
+The mask is split into connected components (:func:`detect_sample_regions`);
+each surviving component is one tissue :class:`Region`. :func:`plan_survey`
+rasters a tile grid over the regions and keeps only tiles whose centre falls on
+tissue, so multiple sections on one slide are all scanned and blank tiles are
+skipped. :func:`detect_sample_bbox` is retained as a thin single-bbox wrapper.
+
+Errors are normalised into :class:`SurveyError` to match ``AcquisitionError`` /
+``StitchError``.
 """
 
 from __future__ import annotations
@@ -79,23 +93,203 @@ class BBox:
 
 
 @dataclass(frozen=True)
+class Region:
+    """One detected tissue region in an overview image.
+
+    ``bbox`` is its pixel bounding box; ``area`` is the component's pixel count;
+    ``centroid`` is ``(y, x)`` in pixels. The full boolean footprint lives in the
+    parent :class:`TissueMask` (this is a lightweight per-region descriptor).
+    """
+
+    bbox: BBox
+    area: int
+    centroid: tuple[float, float]
+
+
+@dataclass(frozen=True)
+class TissueMask:
+    """The result of tissue detection on an overview.
+
+    ``mask`` is an ``HxW`` boolean array (``True`` = tissue) used to gate tiles;
+    ``regions`` are the surviving connected components, largest first. ``bbox`` is
+    the union pixel bbox of all regions (the extent to raster).
+    """
+
+    mask: np.ndarray
+    regions: list[Region]
+    bbox: BBox
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        return (self.mask.shape[0], self.mask.shape[1])
+
+
+@dataclass(frozen=True)
 class ScanPlan:
-    """A planned high-magnification scan over a detected sample region.
+    """A planned high-magnification scan over the detected tissue.
 
     ``positions`` are absolute stage ``(x, y)`` coordinates in **stage steps**,
-    in snake (boustrophedon) order. ``rows``/``cols`` describe the grid;
-    ``step_x``/``step_y`` is the stage motion between adjacent tiles (already
-    accounts for the requested overlap and the camera-stage-mapping affine).
-    ``bbox_stage`` is the detected bounding box transformed into stage steps so
-    callers can log/render the planned region.
+    in snake (boustrophedon) order, one per tile actually kept. ``rowcols`` gives
+    the ``(row, col)`` grid index of each position (parallel to ``positions``),
+    densely renumbered over the raster; a tissue-gated plan is **sparse**, so
+    ``len(positions)`` may be less than ``rows * cols``. ``rows``/``cols`` are the
+    full raster extent; ``step_x``/``step_y`` is the stage motion between adjacent
+    grid cells (accounts for overlap and the CSM affine). ``bbox_stage`` is the
+    detected region transformed into stage steps for logging/rendering.
     """
 
     positions: list[tuple[int, int]]
+    rowcols: list[tuple[int, int]]
     rows: int
     cols: int
     step_x: int
     step_y: int
     bbox_stage: BBox
+
+    @property
+    def tile_count(self) -> int:
+        return len(self.positions)
+
+
+def _tissue_mask_array(
+    image: ImageInput,
+    *,
+    variance_window: int,
+    close_radius: int,
+) -> np.ndarray:
+    """Compute the raw (pre-component-filter) boolean tissue mask for ``image``.
+
+    Combines three complementary cues over the valid (non-canvas) pixels and
+    OR-s them: **saturation** (stained tissue is coloured, glass is near-grey),
+    **intensity** (tissue is darker than the bright background, via Otsu), and
+    **texture** (tissue is textured, background is flat, via local variance).
+    Saturation is the cleanest cue but useless on faint/unstained brightfield,
+    where intensity + texture carry it -- so all three are unioned rather than
+    relied on individually. The union is morphologically closed and clipped back
+    to the valid region. Canvas-fill gaps (exact RGB ``(0,0,0)``) are excluded so
+    they are never misread as dark tissue.
+
+    Returns an ``HxW`` boolean array. Raises :class:`SurveyError` on an empty or
+    all-canvas image.
+    """
+    import numpy as np
+    from scipy.ndimage import uniform_filter
+    from skimage.filters import threshold_otsu
+    from skimage.morphology import binary_closing, disk
+
+    rgb, gray, canvas_mask = _to_arrays_with_canvas_mask(image)
+    h, w = gray.shape
+    if h == 0 or w == 0:
+        raise SurveyError("overview image is empty")
+
+    valid = ~canvas_mask
+    if not valid.any():
+        raise SurveyError("overview image has no valid (non-canvas) pixels")
+
+    def _otsu_dark(channel: np.ndarray, *, invert: bool) -> np.ndarray:
+        """Otsu-threshold ``channel`` over valid pixels; guard flat inputs."""
+        vals = channel[valid]
+        if int(vals.max()) - int(vals.min()) < 5:
+            return np.zeros_like(gray, dtype=bool)
+        try:
+            t = threshold_otsu(vals)
+        except ValueError:
+            # threshold_otsu raises ValueError on a degenerate (near-constant)
+            # histogram the range check above didn't already catch.
+            return np.zeros_like(gray, dtype=bool)
+        picked = (channel > t) if invert else (channel < t)
+        return picked & valid
+
+    # Saturation cue: high S = coloured (stained) tissue. Only meaningful when
+    # the overview is colour (RGB); grayscale inputs give S == 0 everywhere.
+    if rgb is not None:
+        from skimage.color import rgb2hsv
+
+        sat = (rgb2hsv(rgb)[..., 1] * 255.0).astype(np.uint8)
+        saturation_mask = _otsu_dark(sat, invert=True)  # keep high-saturation pixels
+    else:
+        saturation_mask = np.zeros_like(gray, dtype=bool)
+
+    # Intensity cue: tissue is darker than the bright background.
+    intensity_mask = _otsu_dark(gray, invert=False)
+
+    # Texture cue: local variance (mean of squares minus square of mean),
+    # vectorised via two box filters. Above an absolute floor OR a fraction of
+    # the global variance counts as textured.
+    fimg = gray.astype(np.float32)
+    win = max(3, int(variance_window) | 1)  # force odd, >= 3
+    local_mean = uniform_filter(fimg, size=win)
+    local_var = uniform_filter(fimg * fimg, size=win) - local_mean * local_mean
+    global_var = float(fimg[valid].var())
+    var_threshold = max(25.0, 0.1 * global_var)
+    texture_mask = (local_var > var_threshold) & valid
+
+    mask = saturation_mask | intensity_mask | texture_mask
+    if close_radius > 0:
+        mask = binary_closing(mask, disk(int(close_radius)))
+    # Closing can grow the mask into the canvas gutter; clip it back so no
+    # detected component ever includes a canvas-fill pixel.
+    mask &= valid
+    return mask
+
+
+def detect_sample_regions(
+    image: ImageInput,
+    *,
+    min_area_frac: float = 0.005,
+    variance_window: int = 15,
+    close_radius: int = 5,
+    max_regions: int | None = None,
+) -> TissueMask:
+    """Detect every tissue region in an overview image.
+
+    Builds the tissue mask (:func:`_tissue_mask_array`), splits it into connected
+    components, and keeps each component whose area is at least ``min_area_frac``
+    of the image as one :class:`Region` (largest first). Unlike a single-bbox
+    detector this returns *all* qualifying regions, so a slide carrying several
+    sections is fully surveyed. ``max_regions`` caps the number kept (largest by
+    area) when set.
+
+    ``image`` may be a path, a PIL image, or a NumPy array (HxW grayscale or
+    HxWxC RGB). Raises :class:`SurveyError` if no region clears the area
+    threshold, with guidance to check focus/exposure or pass a tighter ROI.
+    """
+    import numpy as np
+    from skimage.measure import label, regionprops
+
+    mask = _tissue_mask_array(image, variance_window=variance_window, close_radius=close_radius)
+    h, w = mask.shape
+
+    labelled = label(mask, connectivity=2)
+    min_area = max(1, int(min_area_frac * h * w))
+    props = [r for r in regionprops(labelled) if r.area >= min_area]
+    if not props:
+        raise SurveyError(
+            "no sample detected in overview; check focus/exposure or pass a tighter ROI"
+        )
+    props.sort(key=lambda r: r.area, reverse=True)
+    if max_regions is not None and max_regions > 0:
+        props = props[:max_regions]
+
+    # Rebuild the mask from only the kept components so plan_survey's tile gate
+    # never lets a below-threshold speck admit a tile.
+    kept_labels = {r.label for r in props}
+    kept_mask = np.isin(labelled, list(kept_labels))
+
+    regions: list[Region] = []
+    for r in props:
+        y0, x0, y1, x1 = r.bbox
+        cy, cx = r.centroid
+        regions.append(
+            Region(bbox=BBox(int(x0), int(y0), int(x1), int(y1)), area=int(r.area),
+                   centroid=(float(cy), float(cx)))
+        )
+
+    x0 = min(reg.bbox.x0 for reg in regions)
+    y0 = min(reg.bbox.y0 for reg in regions)
+    x1 = max(reg.bbox.x1 for reg in regions)
+    y1 = max(reg.bbox.y1 for reg in regions)
+    return TissueMask(mask=kept_mask, regions=regions, bbox=BBox(x0, y0, x1, y1))
 
 
 def detect_sample_bbox(
@@ -105,96 +299,32 @@ def detect_sample_bbox(
     variance_window: int = 15,
     close_radius: int = 5,
 ) -> BBox:
-    """Return the bounding box of the sample in an overview image.
+    """Return the bounding box of the largest tissue region in an overview.
 
-    Combines two cues that distinguish tissue from an empty slide:
-    Otsu-thresholded *intensity* (tissue is darker than the white background)
-    and *local variance* (tissue is textured, the background is flat). The
-    masks are OR-ed, morphologically closed, then split into connected
-    components; components smaller than ``min_area_frac`` of the image are
-    discarded as specks, and the bbox of the **largest remaining component**
-    is returned. The largest-component policy keeps scattered noise (dust /
-    vignetting / camera speckle near an empty corner) from being unioned with
-    the real sample and inflating the bbox to the whole image.
-
-    If the overview comes from a stitched canvas with un-tiled gaps (pixels at
-    exactly RGB ``(0, 0, 0)``), those gaps are masked out before either cue is
-    computed -- otherwise the canvas black would be misread as dark tissue and
-    inflate the bbox to cover the whole canvas.
-
-    ``image`` may be a path, a PIL image, or a NumPy array (HxW grayscale or
-    HxWxC RGB). Raises :class:`SurveyError` if nothing above the area threshold
-    is found, with guidance to check focus/exposure or pass a tighter ROI.
+    Thin wrapper over :func:`detect_sample_regions` kept for backward
+    compatibility: it returns the bbox of the single largest region. Prefer
+    :func:`detect_sample_regions` for multi-region slides and
+    :func:`plan_survey` for a tissue-gated scan that skips empty tiles.
     """
-    import numpy as np
-    from scipy.ndimage import uniform_filter
-    from skimage.filters import threshold_otsu
-    from skimage.measure import label, regionprops
-    from skimage.morphology import binary_closing, disk
-
-    gray, canvas_mask = _to_grayscale_u8_with_canvas_mask(image)
-    h, w = gray.shape
-    if h == 0 or w == 0:
-        raise SurveyError("overview image is empty")
-
-    # Valid pixels = anything that isn't canvas-fill (RGB 0,0,0). For inputs
-    # without canvas gaps, every pixel is valid.
-    valid = ~canvas_mask
-    if not valid.any():
-        raise SurveyError("overview image has no valid (non-canvas) pixels")
-
-    # Intensity cue: tissue is darker. Otsu fails on a flat image (single
-    # value), so guard with a tiny dynamic-range check before calling it.
-    # Compute the threshold over valid pixels only (canvas black would otherwise
-    # pull Otsu's threshold and the dark mask down to nothing useful).
-    intensity_mask = np.zeros_like(gray, dtype=bool)
-    valid_pixels = gray[valid]
-    if int(valid_pixels.max()) - int(valid_pixels.min()) >= 5:
-        try:
-            t = threshold_otsu(valid_pixels)
-            intensity_mask = (gray < t) & valid
-        except Exception:
-            intensity_mask = np.zeros_like(gray, dtype=bool)
-
-    # Texture cue: local variance. Anything above a small fraction of the
-    # global variance counts as textured. Computed via two box means
-    # (mean of squares minus square of mean) to avoid a per-pixel loop.
-    fimg = gray.astype(np.float32)
-    win = max(3, int(variance_window) | 1)  # force odd, >= 3
-    local_mean = uniform_filter(fimg, size=win)
-    local_var = uniform_filter(fimg * fimg, size=win) - local_mean * local_mean
-    global_var = float(fimg[valid].var()) if valid.any() else 0.0
-    var_threshold = max(25.0, 0.1 * global_var)  # absolute floor handles flat backgrounds
-    texture_mask = (local_var > var_threshold) & valid
-
-    mask = intensity_mask | texture_mask
-    if close_radius > 0:
-        mask = binary_closing(mask, disk(int(close_radius)))
-    mask &= valid
-
-    labelled = label(mask, connectivity=2)
-    min_area = max(1, int(min_area_frac * h * w))
-    components = [r for r in regionprops(labelled) if r.area >= min_area]
-    if not components:
-        raise SurveyError(
-            "no sample detected in overview; check focus/exposure or pass a tighter ROI"
-        )
-
-    largest = max(components, key=lambda r: r.area)
-    y0, x0, y1, x1 = largest.bbox
-    return BBox(x0=int(x0), y0=int(y0), x1=int(x1), y1=int(y1))
+    tissue = detect_sample_regions(
+        image, min_area_frac=min_area_frac, variance_window=variance_window,
+        close_radius=close_radius,
+    )
+    return tissue.regions[0].bbox
 
 
-def _to_grayscale_u8_with_canvas_mask(image: ImageInput) -> tuple[np.ndarray, np.ndarray]:
-    """Coerce ``image`` to an ``uint8`` grayscale array + canvas-fill mask.
+def _to_arrays_with_canvas_mask(
+    image: ImageInput,
+) -> tuple[np.ndarray | None, np.ndarray, np.ndarray]:
+    """Coerce ``image`` to ``(rgb_u8_or_None, gray_u8, canvas_mask)``.
 
-    The canvas mask is ``True`` wherever the input had all RGB channels at
-    exactly 0 -- the convention :func:`_stitch_overview_by_stage` and any
-    stitcher use for "no tile placed here." For inputs that are already
-    grayscale (or read from disk via ``Image.convert("L")``), the canvas mask
-    is all-``False``: we cannot distinguish real-black from canvas-black once
-    the colour information is gone, and a sample is never *all-zero* dark, so
-    treating it as "no canvas gaps" is safe.
+    ``rgb`` is the ``HxWx3`` uint8 array when colour is available (needed for the
+    saturation cue), else ``None`` for grayscale-only inputs. ``gray`` is the
+    ``uint8`` luminance. ``canvas_mask`` is ``True`` wherever the input had all
+    RGB channels at exactly 0 -- the "no tile placed here" convention used by
+    :func:`_stitch_overview_by_stage`. Grayscale inputs get an all-``False``
+    canvas mask: real-black and canvas-black are indistinguishable once colour is
+    gone, and a sample is never *all-zero* dark, so "no gaps" is the safe read.
 
     Accepts a path, PIL image, or NumPy array (grayscale or RGB / RGBA).
     Raises :class:`SurveyError` on unreadable paths or unsupported shapes.
@@ -202,11 +332,11 @@ def _to_grayscale_u8_with_canvas_mask(image: ImageInput) -> tuple[np.ndarray, np
     import numpy as np
     from PIL import Image, UnidentifiedImageError
 
-    def _from_rgb_array(rgb_arr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    def _from_rgb_array(rgb_arr: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         canvas = (rgb_arr[..., 0] == 0) & (rgb_arr[..., 1] == 0) & (rgb_arr[..., 2] == 0)
         f = rgb_arr.astype(np.float32)
         gray = 0.299 * f[..., 0] + 0.587 * f[..., 1] + 0.114 * f[..., 2]
-        return np.clip(gray, 0, 255).astype(np.uint8), canvas
+        return rgb_arr, np.clip(gray, 0, 255).astype(np.uint8), canvas
 
     if isinstance(image, (str, Path)):
         try:
@@ -231,9 +361,113 @@ def _to_grayscale_u8_with_canvas_mask(image: ImageInput) -> tuple[np.ndarray, np
             raise SurveyError(f"unsupported image array shape {arr.shape}")
         if arr.dtype != np.uint8:
             arr = np.clip(arr, 0, 255).astype(np.uint8)
-        # No RGB available -> no way to distinguish canvas-black from real-dark.
-        return arr, np.zeros(arr.shape, dtype=bool)
+        # No RGB available -> no saturation cue, and no way to distinguish
+        # canvas-black from real-dark.
+        return None, arr, np.zeros(arr.shape, dtype=bool)
     raise SurveyError(f"unsupported image type {type(image).__name__}")
+
+
+class _GridGeometry:
+    """Shared image-space raster geometry over a pixel ``bbox``.
+
+    Encapsulates the pixel-to-stage conversion so both :func:`plan_tile_grid`
+    (dense) and :func:`plan_survey` (tissue-gated, sparse) compute identical tile
+    positions and only differ in which cells they keep.
+    """
+
+    def __init__(
+        self,
+        bbox: BBox,
+        *,
+        overview_origin_stage: tuple[int, int],
+        overview_csm: list[list[float]],
+        tile_size_px: tuple[int, int],
+        overlap: float,
+    ) -> None:
+        import numpy as np
+
+        if bbox.is_empty:
+            raise SurveyError("cannot plan a scan over an empty bounding box")
+        tw, th = tile_size_px
+        if tw <= 0 or th <= 0:
+            raise SurveyError(f"tile_size_px must be positive, got {tile_size_px!r}")
+        if not 0.0 <= overlap < 1.0:
+            raise SurveyError(f"overlap must be in [0, 1), got {overlap!r}")
+        csm = np.asarray(overview_csm, dtype=float)
+        if csm.shape != (2, 2):
+            raise SurveyError(f"overview_csm must be a 2x2 matrix, got shape {csm.shape}")
+
+        # Plan the grid in image (pixel) space, where "overlap" is naturally
+        # meaningful and the camera axes align with the tile edges; convert each
+        # cell's origin to stage steps via the CSM. This matters when the CSM is
+        # rotated (~90 deg on OpenFlexure): image-x maps mostly to stage-y, so a
+        # camera-horizontal step moves the stage in y. Stepping along stage axes
+        # directly gives tiles arranged along the wrong axis that never overlap.
+        bbox_w = bbox.x1 - bbox.x0
+        bbox_h = bbox.y1 - bbox.y0
+        self.tw, self.th = tw, th
+        self.step_px_x = max(1.0, tw * (1.0 - overlap))
+        self.step_px_y = max(1.0, th * (1.0 - overlap))
+        self.cols = (
+            max(1, int(np.ceil(max(0, bbox_w - tw) / self.step_px_x)) + 1) if bbox_w > tw else 1
+        )
+        self.rows = (
+            max(1, int(np.ceil(max(0, bbox_h - th) / self.step_px_y)) + 1) if bbox_h > th else 1
+        )
+
+        # Per-step stage motion is a 2-vector per axis: one image-axis step moves
+        # the stage in both x and y in general.
+        self.col_step_stage = csm @ np.array([self.step_px_x, 0.0])
+        self.row_step_stage = csm @ np.array([0.0, self.step_px_y])
+        if np.allclose(self.col_step_stage, 0) or np.allclose(self.row_step_stage, 0):
+            raise SurveyError("CSM projects a step to zero stage motion -- check overview_csm")
+
+        self.bbox = bbox
+        self.csm = csm
+        self.ox, self.oy = overview_origin_stage
+        bbox_origin_stage = csm @ np.array([bbox.x0, bbox.y0])
+        self.origin_stage_x = self.ox + bbox_origin_stage[0]
+        self.origin_stage_y = self.oy + bbox_origin_stage[1]
+
+    def tile_center_px(self, r: int, c: int) -> tuple[float, float]:
+        """Centre of grid cell ``(r, c)`` in *overview-image* pixel coords."""
+        return (
+            self.bbox.x0 + c * self.step_px_x + self.tw / 2.0,
+            self.bbox.y0 + r * self.step_px_y + self.th / 2.0,
+        )
+
+    def tile_stage(self, r: int, c: int) -> tuple[int, int]:
+        """Absolute stage ``(x, y)`` for the origin of grid cell ``(r, c)``."""
+        sx = self.origin_stage_x + c * self.col_step_stage[0] + r * self.row_step_stage[0]
+        sy = self.origin_stage_y + c * self.col_step_stage[1] + r * self.row_step_stage[1]
+        return (int(round(sx)), int(round(sy)))
+
+    def bbox_stage(self) -> BBox:
+        """The pixel ``bbox`` projected into an axis-aligned stage-step box."""
+        import numpy as np
+
+        b = self.bbox
+        corners_px = np.array(
+            [[b.x0, b.y0], [b.x1, b.y0], [b.x1, b.y1], [b.x0, b.y1]], dtype=float
+        )
+        corners_stage = corners_px @ self.csm.T
+        sx_min, sy_min = corners_stage.min(axis=0)
+        sx_max, sy_max = corners_stage.max(axis=0)
+        return BBox(
+            x0=int(round(self.ox + sx_min)),
+            y0=int(round(self.oy + sy_min)),
+            x1=int(round(self.ox + sx_max)),
+            y1=int(round(self.oy + sy_max)),
+        )
+
+    def step_magnitudes(self) -> tuple[int, int]:
+        """Euclidean per-axis stage step, for callers that log a single number."""
+        import numpy as np
+
+        return (
+            int(round(float(np.hypot(*self.col_step_stage)))),
+            int(round(float(np.hypot(*self.row_step_stage)))),
+        )
 
 
 def plan_tile_grid(
@@ -244,103 +478,139 @@ def plan_tile_grid(
     tile_size_px: tuple[int, int],
     overlap: float = 0.2,
 ) -> ScanPlan:
-    """Plan a snake-ordered scan that covers ``bbox`` at the working magnification.
+    """Plan a **dense** snake-ordered scan covering ``bbox`` at working magnification.
 
-    The bounding box is given in *overview* pixels. ``overview_origin_stage`` is
-    the absolute stage ``(x, y)`` (in steps) corresponding to overview pixel
-    ``(0, 0)``, and ``overview_csm`` is the camera-stage-mapping matrix used
-    for that overview (``stage_delta = csm @ pixel_delta``). For each axis the
-    pixel-space bbox is projected into stage space, the per-tile stage motion
-    is derived from ``tile_size_px`` and ``overlap``, and a snake-ordered grid
-    of absolute stage positions is generated.
+    Every grid cell over the pixel ``bbox`` is kept (no tissue gate), so
+    ``len(positions) == rows * cols``. ``overview_origin_stage`` is the absolute
+    stage ``(x, y)`` at overview pixel ``(0, 0)``; ``overview_csm`` maps pixel
+    deltas to stage deltas. For a tissue-gated scan that skips blank tiles use
+    :func:`plan_survey`.
 
-    Raises :class:`SurveyError` on invalid inputs (empty bbox, non-positive
-    tile size, overlap not in ``[0, 1)``, or a degenerate CSM).
+    Raises :class:`SurveyError` on invalid inputs (empty bbox, non-positive tile
+    size, overlap not in ``[0, 1)``, or a degenerate CSM).
     """
-    import numpy as np
-
-    if bbox.is_empty:
-        raise SurveyError("cannot plan a scan over an empty bounding box")
-    tw, th = tile_size_px
-    if tw <= 0 or th <= 0:
-        raise SurveyError(f"tile_size_px must be positive, got {tile_size_px!r}")
-    if not 0.0 <= overlap < 1.0:
-        raise SurveyError(f"overlap must be in [0, 1), got {overlap!r}")
-    csm = np.asarray(overview_csm, dtype=float)
-    if csm.shape != (2, 2):
-        raise SurveyError(f"overview_csm must be a 2x2 matrix, got shape {csm.shape}")
-
-    # Plan the grid in image (pixel) space, where "overlap" is naturally
-    # meaningful and the camera axes are aligned with the tile edges. Each tile
-    # covers `tw x th` pixels in the bbox's coordinate frame; the per-tile
-    # stride is `tile_size * (1 - overlap)` pixels. We then convert each tile's
-    # origin from pixels to absolute stage coordinates via the CSM.
-    #
-    # This is critical when the CSM is rotated (e.g. ~90 degrees on
-    # OpenFlexure): the image-x axis maps mostly to stage-y, so a single
-    # camera-horizontal step requires moving the stage in y, not x. Computing
-    # the stride in stage axes directly (as a previous version did) gives
-    # tiles that are arranged along the wrong stage axis and never overlap.
-    bbox_w = bbox.x1 - bbox.x0
-    bbox_h = bbox.y1 - bbox.y0
-    step_px_x = max(1.0, tw * (1.0 - overlap))
-    step_px_y = max(1.0, th * (1.0 - overlap))
-    cols = max(1, int(np.ceil(max(0, bbox_w - tw) / step_px_x)) + 1) if bbox_w > tw else 1
-    rows = max(1, int(np.ceil(max(0, bbox_h - th) / step_px_y)) + 1) if bbox_h > th else 1
-
-    # Convert per-step pixel motion to stage-step motion via the CSM. These
-    # are 2-vectors -- one full vector per axis -- because a single image-axis
-    # step in general moves the stage in BOTH x and y.
-    col_step_stage = csm @ np.array([step_px_x, 0.0])
-    row_step_stage = csm @ np.array([0.0, step_px_y])
-    if np.allclose(col_step_stage, 0) or np.allclose(row_step_stage, 0):
-        raise SurveyError("CSM projects a step to zero stage motion -- check overview_csm")
-
-    ox, oy = overview_origin_stage
-    # First tile's image-space origin is bbox.(x0, y0); stage origin is the
-    # CSM-projected point relative to the overview's stage anchor.
-    bbox_origin_stage = csm @ np.array([bbox.x0, bbox.y0])
-    origin_stage_x = ox + bbox_origin_stage[0]
-    origin_stage_y = oy + bbox_origin_stage[1]
-
+    geo = _GridGeometry(
+        bbox,
+        overview_origin_stage=overview_origin_stage,
+        overview_csm=overview_csm,
+        tile_size_px=tile_size_px,
+        overlap=overlap,
+    )
     positions: list[tuple[int, int]] = []
-    for r in range(rows):
-        col_iter = range(cols) if r % 2 == 0 else range(cols - 1, -1, -1)
+    rowcols: list[tuple[int, int]] = []
+    for r in range(geo.rows):
+        col_iter = range(geo.cols) if r % 2 == 0 else range(geo.cols - 1, -1, -1)
         for c in col_iter:
-            stage = (
-                origin_stage_x + c * col_step_stage[0] + r * row_step_stage[0],
-                origin_stage_y + c * col_step_stage[1] + r * row_step_stage[1],
-            )
-            positions.append((int(round(stage[0])), int(round(stage[1]))))
-
-    # bbox in stage coords: project all four pixel corners and take the axis-aligned span.
-    corners_px = np.array(
-        [[bbox.x0, bbox.y0], [bbox.x1, bbox.y0], [bbox.x1, bbox.y1], [bbox.x0, bbox.y1]],
-        dtype=float,
-    )
-    corners_stage = corners_px @ csm.T
-    sx_min, sy_min = corners_stage.min(axis=0)
-    sx_max, sy_max = corners_stage.max(axis=0)
-    bbox_stage = BBox(
-        x0=int(round(ox + sx_min)),
-        y0=int(round(oy + sy_min)),
-        x1=int(round(ox + sx_max)),
-        y1=int(round(oy + sy_max)),
-    )
-
-    # step_x / step_y are reported as the magnitude (Euclidean) of the per-axis
-    # stage motion so callers logging "step" see a single sensible number even
-    # when the move is diagonal in stage space.
-    step_x = float(np.hypot(*col_step_stage))
-    step_y = float(np.hypot(*row_step_stage))
+            positions.append(geo.tile_stage(r, c))
+            rowcols.append((r, c))
+    step_x, step_y = geo.step_magnitudes()
     return ScanPlan(
         positions=positions,
-        rows=rows,
-        cols=cols,
-        step_x=int(round(step_x)),
-        step_y=int(round(step_y)),
-        bbox_stage=bbox_stage,
+        rowcols=rowcols,
+        rows=geo.rows,
+        cols=geo.cols,
+        step_x=step_x,
+        step_y=step_y,
+        bbox_stage=geo.bbox_stage(),
     )
+
+
+def plan_survey(
+    tissue: TissueMask,
+    *,
+    overview_origin_stage: tuple[int, int],
+    overview_csm: list[list[float]],
+    tile_size_px: tuple[int, int],
+    overlap: float = 0.2,
+) -> ScanPlan:
+    """Plan a **tissue-gated** snake scan over detected tissue, skipping blank tiles.
+
+    Rasters the same snake grid as :func:`plan_tile_grid` over the union bbox of
+    ``tissue.regions``, but keeps a cell only if its centre pixel lands on tissue
+    (``tissue.mask``). Blank cells between and around regions are dropped, so a
+    slide with several sections is covered without scanning the empty slide in
+    between. The kept cells are renumbered densely into snake-ordered
+    ``(row, col)`` (``rowcols``) so tile filenames stay well-formed.
+
+    Falls back to keeping every cell in the union bbox if the gate would leave no
+    tiles (e.g. tiles larger than the tissue speck), so a scan is never empty.
+
+    Raises :class:`SurveyError` on the same invalid inputs as
+    :func:`plan_tile_grid`, or if ``tissue`` has no regions.
+    """
+    if not tissue.regions:
+        raise SurveyError("cannot plan a survey with no detected tissue regions")
+    geo = _GridGeometry(
+        tissue.bbox,
+        overview_origin_stage=overview_origin_stage,
+        overview_csm=overview_csm,
+        tile_size_px=tile_size_px,
+        overlap=overlap,
+    )
+    mask = tissue.mask
+    mh, mw = mask.shape
+
+    def keep(r: int, c: int) -> bool:
+        cx, cy = geo.tile_center_px(r, c)
+        icx, icy = int(round(cx)), int(round(cy))
+        if 0 <= icy < mh and 0 <= icx < mw:
+            return bool(mask[icy, icx])
+        return False
+
+    positions: list[tuple[int, int]] = []
+    rowcols: list[tuple[int, int]] = []
+    for r in range(geo.rows):
+        col_iter = range(geo.cols) if r % 2 == 0 else range(geo.cols - 1, -1, -1)
+        for c in col_iter:
+            if keep(r, c):
+                positions.append(geo.tile_stage(r, c))
+                rowcols.append((r, c))
+
+    if not positions:
+        # Every tile centre missed the tissue (tissue smaller than one tile).
+        # Scan the whole union bbox rather than returning an empty plan.
+        for r in range(geo.rows):
+            col_iter = range(geo.cols) if r % 2 == 0 else range(geo.cols - 1, -1, -1)
+            for c in col_iter:
+                positions.append(geo.tile_stage(r, c))
+                rowcols.append((r, c))
+
+    # Renumber kept cells densely so filenames are compact and gap-free while
+    # preserving the snake visit order.
+    dense_rowcols = _densify_rowcols(rowcols)
+    step_x, step_y = geo.step_magnitudes()
+    return ScanPlan(
+        positions=positions,
+        rowcols=dense_rowcols,
+        rows=geo.rows,
+        cols=geo.cols,
+        step_x=step_x,
+        step_y=step_y,
+        bbox_stage=geo.bbox_stage(),
+    )
+
+
+def _densify_rowcols(rowcols: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Renumber sparse ``(row, col)`` to gap-free indices, preserving order.
+
+    Rows keep their relative order (0, 1, 2, ...) and within each kept row the
+    columns are renumbered 0..k in visit order, so filenames like
+    ``tile_r00_c00`` stay compact even though the original grid was sparse.
+    """
+    row_order: list[int] = []
+    for r, _ in rowcols:
+        if r not in row_order:
+            row_order.append(r)
+    row_index = {r: i for i, r in enumerate(row_order)}
+
+    dense: list[tuple[int, int]] = []
+    seen_in_row: dict[int, int] = {}
+    for r, _ in rowcols:
+        dr = row_index[r]
+        dc = seen_in_row.get(dr, 0)
+        seen_in_row[dr] = dc + 1
+        dense.append((dr, dc))
+    return dense
 
 
 def run_auto_survey(
@@ -358,6 +628,7 @@ def run_auto_survey(
     high_pass_sigma: float = 10.0,
     minimum_overlap: float = 0.2,
     min_area_frac: float = 0.005,
+    max_regions: int | None = None,
 ) -> MosaicResult:
     """End-to-end automatic whole-slide survey, driven by an already-connected scope.
 
@@ -370,9 +641,11 @@ def run_auto_survey(
     2. **Overview stitch** -- paste the overview tiles by stage + CSM into a
        single canvas (``{out_file.stem}_overview.jpg``). No correlation -- the
        overview only needs to be good enough for segmentation.
-    3. **Detect** the sample bounding box on that canvas via
-       :func:`detect_sample_bbox`.
-    4. **Plan** a high-resolution scan over the bbox via :func:`plan_tile_grid`.
+    3. **Detect** every tissue region on that canvas via
+       :func:`detect_sample_regions` (``max_regions`` caps how many are kept).
+    4. **Plan** a tissue-gated high-resolution scan over the regions via
+       :func:`plan_survey` -- tiles whose centre misses the tissue are skipped,
+       so blank slide between sections is not scanned.
     5. **Execute** the plan with
        :func:`yosegi.acquire.fetch_tiles_at_positions` into
        ``{out_file.stem}_tiles/``.
@@ -423,32 +696,39 @@ def run_auto_survey(
     # Stage 2: stitch the overview by stage + CSM into one canvas. We do this
     # ourselves rather than via openflexure-stitching so we control the
     # pixel-to-stage origin exactly: pixel (0, 0) == (overview_origin_x_stage,
-    # overview_origin_y_stage). That anchor is what plan_tile_grid needs.
+    # overview_origin_y_stage). That anchor is what plan_survey needs. Detection
+    # runs on the in-memory canvas (not the re-read JPEG) so JPEG compression
+    # can't perturb the exact (0,0,0) canvas-gap convention.
     overview_image, overview_origin_stage = _stitch_overview_by_stage(overview_tiles, csm)
     overview_image.save(overview_image_path, "JPEG", quality=85)
 
-    # Stage 3: detect bounding box on the overview.
-    bbox = detect_sample_bbox(overview_image, min_area_frac=min_area_frac)
+    # Stage 3: detect every tissue region on the overview.
+    tissue = detect_sample_regions(
+        overview_image, min_area_frac=min_area_frac, max_regions=max_regions
+    )
 
-    # Stage 4: plan the high-res scan. tile_size_px is the working frame size,
-    # which equals the overview tile size since we did not change objective.
+    # Stage 4: plan the tissue-gated high-res scan. tile_size_px is the working
+    # frame size, which equals the overview tile size since we did not change
+    # objective.
     with Image.open(overview_tiles[0].path) as tile0:
         tile_w, tile_h = tile0.size
-    plan = plan_tile_grid(
-        bbox,
+    plan = plan_survey(
+        tissue,
         overview_origin_stage=overview_origin_stage,
         overview_csm=csm,
         tile_size_px=(tile_w, tile_h),
         overlap=overlap,
     )
 
-    # Stage 5: execute the plan.
+    # Stage 5: execute the (possibly sparse) plan, passing the densely-renumbered
+    # (row, col) so tile filenames stay compact.
     fetch_tiles_at_positions(
         client=client,
         out_dir=tiles_dir,
         positions=plan.positions,
         rows=plan.rows,
         cols=plan.cols,
+        rowcols=plan.rowcols,
         autofocus=autofocus,
         autofocus_once=autofocus_once,
     )
@@ -519,9 +799,13 @@ def _stitch_overview_by_stage(
 
 __all__ = [
     "BBox",
+    "Region",
     "ScanPlan",
     "SurveyError",
+    "TissueMask",
     "detect_sample_bbox",
+    "detect_sample_regions",
+    "plan_survey",
     "plan_tile_grid",
     "run_auto_survey",
 ]

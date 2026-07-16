@@ -162,6 +162,13 @@ def run(
         "--min-area-frac",
         help="Minimum tissue area (fraction of overview image) for detection (--auto only).",
     ),
+    max_regions: int | None = typer.Option(
+        None,
+        "--max-regions",
+        min=1,
+        help="Cap the number of tissue regions surveyed, largest first (--auto only). "
+             "Default: survey every detected region.",
+    ),
     autofocus: bool = typer.Option(
         True, "--autofocus/--no-autofocus", help="Autofocus at each tile before capture."
     ),
@@ -214,6 +221,7 @@ def run(
                 high_pass_sigma=high_pass_sigma,
                 minimum_overlap=minimum_overlap,
                 min_area_frac=min_area_frac,
+                max_regions=max_regions,
             )
         else:
             tile_dir = output.parent / f"{output.stem}_tiles"

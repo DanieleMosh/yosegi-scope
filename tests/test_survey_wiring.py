@@ -101,6 +101,91 @@ class _Scope:
         return PIL.Image.fromarray(arr)
 
 
+class _TwoRegionScope(_Scope):
+    """Fake scope with two separated tissue blocks and empty slide between them.
+
+    Frames are dark/textured (tissue) inside either of two stage boxes and bright
+    (empty) everywhere else. Drives ``run_auto_survey`` to plan a *sparse* scan
+    that skips the gap between the regions.
+    """
+
+    def __init__(self, tile_size: tuple[int, int] = (60, 60)) -> None:
+        super().__init__(tile_size=tile_size)
+        # The overview raster starts at the scope origin (0,0) and steps in the
+        # +x/+y direction, so tissue must sit in the positive quadrant it covers
+        # (here [0, 320] on each axis for a 9x9 grid at step 40). Two blocks with
+        # a wide empty gap between them (x 100..220) stay two components through
+        # the morphological close.
+        self._boxes = [
+            ((0, 90), (0, 320)),      # (x_range, y_range) left block
+            ((230, 320), (0, 320)),   # right block
+        ]
+
+    def capture_image(self) -> PIL.Image.Image:
+        self.captures += 1
+        x, y = self._pos["x"], self._pos["y"]
+        self.visited.append((x, y))
+        in_tissue = any(
+            xr[0] <= x <= xr[1] and yr[0] <= y <= yr[1] for xr, yr in self._boxes
+        )
+        if in_tissue:
+            rng = np.random.default_rng(seed=(abs(x) * 17 + abs(y) * 11) & 0xFFFF)
+            arr = rng.integers(20, 80, size=(self._tile_h, self._tile_w, 3), dtype=np.uint8)
+        else:
+            arr = np.full((self._tile_h, self._tile_w, 3), 245, dtype=np.uint8)
+        return PIL.Image.fromarray(arr)
+
+
+@requires_ofs
+def test_run_auto_survey_skips_empty_tiles_between_regions(tmp_path: Path) -> None:
+    """End-to-end: two separated tissue blocks -> the high-res scan skips the
+    empty gap, so it captures fewer tiles than a dense grid over the union bbox."""
+    out = tmp_path / "mosaic.jpg"
+    scope = _TwoRegionScope(tile_size=(60, 60))
+    result = run_auto_survey(
+        client=scope,
+        out_file=out,
+        overview_rows=9,
+        overview_cols=9,
+        overview_step_x=40,
+        overview_step_y=40,
+        overlap=0.2,
+        autofocus=False,
+        correlate=False,
+        min_area_frac=0.002,
+    )
+    assert out.exists()
+    overview_captures = 9 * 9
+    highres_tiles = scope.captures - overview_captures
+    assert highres_tiles > 0
+    # The stitched mosaic used every high-res tile captured.
+    assert result.tile_count == highres_tiles
+
+    # Reconstruct the dense grid the planner would have produced over the same
+    # union bbox and confirm the tissue gate dropped tiles from the empty gap.
+    import json
+
+    from yosegi.survey import ScanPlan, detect_sample_regions, plan_survey, plan_tile_grid
+
+    manifest = json.loads((tmp_path / "mosaic_overview" / "manifest.json").read_text())
+    csm = manifest["camera_stage_mapping"]
+    from PIL import Image
+
+    with Image.open(tmp_path / "mosaic_overview.jpg") as ov:
+        tissue = detect_sample_regions(np.asarray(ov.convert("RGB")), min_area_frac=0.002)
+    # Two distinct regions were detected.
+    assert len(tissue.regions) >= 2
+    gated: ScanPlan = plan_survey(
+        tissue, overview_origin_stage=(0, 0), overview_csm=csm,
+        tile_size_px=(60, 60), overlap=0.2,
+    )
+    dense: ScanPlan = plan_tile_grid(
+        tissue.bbox, overview_origin_stage=(0, 0), overview_csm=csm,
+        tile_size_px=(60, 60), overlap=0.2,
+    )
+    assert gated.tile_count < dense.tile_count
+
+
 @requires_ofs
 def test_run_auto_survey_full_pipeline(tmp_path: Path) -> None:
     out = tmp_path / "mosaic.jpg"
