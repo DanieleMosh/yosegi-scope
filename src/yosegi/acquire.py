@@ -137,6 +137,7 @@ def fetch_tiles(
     autofocus: bool = False,
     overlap: float | None = None,
     calibrate: bool = True,
+    autofocus_once: bool = False,
     *,
     client: Microscope | None = None,
 ) -> list[Tile]:
@@ -145,11 +146,14 @@ def fetch_tiles(
     The stage moves ``step_x``/``step_y`` steps between adjacent tiles in a snake
     pattern. ``overlap`` is recorded in the manifest but does not affect motion.
     When ``autofocus`` is set, the scope refocuses before each capture. When
-    ``calibrate`` is set (default), the scope's camera-stage-mapping is run if it
-    has none stored. Each tile is saved with its stage position and the CSM affine
-    matrix in EXIF, which is what the stitcher reads. Pass ``client`` to use an
-    already-connected microscope (mainly for testing); otherwise one is opened
-    from ``host`` (or mDNS discovery when ``host`` is ``None``).
+    ``autofocus_once`` is set instead, the scope autofocuses on the first tile
+    only and reuses the resulting focus for the rest of the scan (faster, fine
+    for flat samples). When ``calibrate`` is set (default), the scope's
+    camera-stage-mapping is run if it has none stored. Each tile is saved with
+    its stage position and the CSM affine matrix in EXIF, which is what the
+    stitcher reads. Pass ``client`` to use an already-connected microscope
+    (mainly for testing); otherwise one is opened from ``host`` (or mDNS
+    discovery when ``host`` is ``None``).
 
     Returns one :class:`~yosegi.models.Tile` per captured patch and writes a
     ``manifest.json`` alongside the images.
@@ -168,16 +172,103 @@ def fetch_tiles(
     csm = _get_csm(scope, calibrate)
 
     start = dict(scope.position)
+    plan: list[tuple[int, int, int, int]] = [
+        (r, c, start["x"] + c * step_x, start["y"] + r * step_y)
+        for r, c in snake_cells(rows, cols)
+    ]
+    tiles = _capture_at_plan(
+        scope, out_dir, plan,
+        autofocus=autofocus, autofocus_once=autofocus_once, csm=csm,
+    )
+
+    scope.move(start, absolute=True)
+    _write_manifest(out_dir, rows, cols, step_x, step_y, overlap, autofocus, start, csm, tiles)
+    return tiles
+
+
+def fetch_tiles_at_positions(
+    client: Microscope,
+    out_dir: Path,
+    positions: list[tuple[int, int]],
+    *,
+    rows: int,
+    cols: int,
+    autofocus: bool = False,
+    autofocus_once: bool = False,
+    calibrate: bool = False,
+) -> list[Tile]:
+    """Capture one tile at each absolute stage ``(x, y)`` in ``positions``.
+
+    Used by the auto-survey pipeline to execute a :class:`~yosegi.survey.ScanPlan`
+    that was computed from a detected bounding box. ``positions`` is assumed to
+    cover a ``rows x cols`` snake-ordered grid (the planner's output); the
+    ``(row, col)`` for each position is derived from its index so EXIF and
+    filenames stay consistent with ``fetch_tiles``. The scope returns to its
+    starting position when done. ``autofocus_once`` autofocuses only at the
+    first tile and keeps that focus for the rest. Pass ``calibrate=True`` to run
+    camera-stage mapping when the scope has none stored.
+    """
+    if rows < 1 or cols < 1:
+        raise AcquisitionError("rows and cols must be >= 1")
+    if len(positions) != rows * cols:
+        raise AcquisitionError(
+            f"positions has {len(positions)} entries but rows*cols = {rows * cols}"
+        )
+
+    out_dir = Path(out_dir)
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise AcquisitionError(f"Could not create output directory {out_dir}: {exc}") from exc
+
+    csm = _get_csm(client, calibrate)
+    start = dict(client.position)
+
+    snake = list(snake_cells(rows, cols))
+    plan = [(r, c, x, y) for (r, c), (x, y) in zip(snake, positions, strict=True)]
+
+    # _capture_at_plan skips the move before its first entry (correct for
+    # fetch_tiles, whose plan[0] is the current position). Here plan[0] is an
+    # arbitrary absolute target, so move there first -- otherwise the whole scan
+    # is captured offset by (start - positions[0]) and images the wrong region.
+    first_x, first_y = positions[0]
+    client.move({"x": int(first_x), "y": int(first_y), "z": start["z"]}, absolute=True)
+
+    tiles = _capture_at_plan(
+        client, out_dir, plan,
+        autofocus=autofocus, autofocus_once=autofocus_once, csm=csm,
+    )
+    client.move(start, absolute=True)
+    _write_positions_manifest(out_dir, rows, cols, positions, autofocus, start, csm, tiles)
+    return tiles
+
+
+def _capture_at_plan(
+    scope: Microscope,
+    out_dir: Path,
+    plan: list[tuple[int, int, int, int]],
+    *,
+    autofocus: bool,
+    csm: list[list[float]] | None,
+    autofocus_once: bool = False,
+) -> list[Tile]:
+    """Walk ``plan`` of ``(row, col, abs_x, abs_y)`` and capture one tile per entry.
+
+    Uses ``move_rel`` between steps so the scope incurs only the per-step travel,
+    not the cumulative distance from the origin. Shared by both ``fetch_tiles``
+    (regular snake grid) and ``fetch_tiles_at_positions`` (planned scan).
+    ``autofocus_once`` runs autofocus only at the first tile; ``autofocus`` (when
+    true) runs it at every tile. ``autofocus`` takes precedence if both are set.
+    """
     tiles: list[Tile] = []
     prev: tuple[int, int] | None = None
-
-    for row, col in snake_cells(rows, cols):
+    for i, (row, col, abs_x, abs_y) in enumerate(plan):
         if prev is not None:
-            dx = (col - prev[1]) * step_x
-            dy = (row - prev[0]) * step_y
+            dx = abs_x - prev[0]
+            dy = abs_y - prev[1]
             if dx or dy:
                 scope.move_rel({"x": dx, "y": dy, "z": 0})
-        if autofocus:
+        if autofocus or (autofocus_once and i == 0):
             scope.autofocus()
         image = scope.capture_image()
         path = out_dir / f"tile_r{row:02d}_c{col:02d}.jpg"
@@ -194,10 +285,7 @@ def fetch_tiles(
                 stage_z=pos.get("z"),
             )
         )
-        prev = (row, col)
-
-    scope.move(start, absolute=True)
-    _write_manifest(out_dir, rows, cols, step_x, step_y, overlap, autofocus, start, csm, tiles)
+        prev = (abs_x, abs_y)
     return tiles
 
 
@@ -223,18 +311,52 @@ def _write_manifest(
         "autofocus": autofocus,
         "camera_stage_mapping": csm,
         "start_position": start,
-        "tiles": [
-            {
-                "filename": t.path.name,
-                "row": t.row,
-                "col": t.col,
-                "stage_x": t.stage_x,
-                "stage_y": t.stage_y,
-                "stage_z": t.stage_z,
-            }
-            for t in tiles
-        ],
+        "tiles": [_tile_record(t) for t in tiles],
     }
     path = out_dir / "manifest.json"
     path.write_text(json.dumps(manifest, indent=2))
     return path
+
+
+def _write_positions_manifest(
+    out_dir: Path,
+    rows: int,
+    cols: int,
+    positions: list[tuple[int, int]],
+    autofocus: bool,
+    start: dict[str, int],
+    csm: list[list[float]] | None,
+    tiles: list[Tile],
+) -> Path:
+    """Write the handoff manifest for a planned-position scan.
+
+    Same ``yosegi.acquire/1`` schema as :func:`_write_manifest` so ``stitch_tiles``
+    can read the CSM from it, but records the planned ``grid`` extent and the
+    absolute target positions instead of a fixed step, since a planned scan may be
+    sparse (fewer tiles than ``rows * cols`` once empty tiles are skipped).
+    """
+    manifest = {
+        "schema": "yosegi.acquire/1",
+        "tool_version": __version__,
+        "grid": {"rows": rows, "cols": cols},
+        "planned_positions": [[int(x), int(y)] for x, y in positions],
+        "autofocus": autofocus,
+        "camera_stage_mapping": csm,
+        "start_position": start,
+        "tiles": [_tile_record(t) for t in tiles],
+    }
+    path = out_dir / "manifest.json"
+    path.write_text(json.dumps(manifest, indent=2))
+    return path
+
+
+def _tile_record(t: Tile) -> dict[str, Any]:
+    """Serialise one :class:`Tile` for a manifest's ``tiles`` list."""
+    return {
+        "filename": t.path.name,
+        "row": t.row,
+        "col": t.col,
+        "stage_x": t.stage_x,
+        "stage_y": t.stage_y,
+        "stage_z": t.stage_z,
+    }

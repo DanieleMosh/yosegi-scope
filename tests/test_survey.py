@@ -54,14 +54,24 @@ def test_ignores_tiny_speck_below_area_threshold() -> None:
         detect_sample_bbox(img)
 
 
-def test_two_blobs_yield_union_bbox() -> None:
+def test_two_blobs_yield_largest_bbox() -> None:
+    """Two disconnected blobs: the bbox snaps to the larger one.
+
+    Old behaviour was to return the union of all surviving components, but on
+    real overviews that lets a single scattered speck of camera noise near an
+    empty corner inflate the bbox to cover the whole image. The current policy
+    is to return the bbox of the *largest* component, which keeps detection
+    robust to noise; a multi-region slide can still be re-surveyed with a
+    smaller ``min_area_frac`` if both blobs are important.
+    """
     img = np.full((300, 400), 240, dtype=np.uint8)
-    img[40:90, 50:120] = 40   # top-left blob
-    img[200:260, 280:360] = 40  # bottom-right blob
+    img[40:90, 50:120] = 40        # smaller blob (50x70 = 3500 px)
+    img[200:260, 280:380] = 40     # larger blob (60x100 = 6000 px)
     bbox = detect_sample_bbox(img)
-    # union must enclose both blobs
-    assert bbox.x0 <= 50 and bbox.x1 >= 360
-    assert bbox.y0 <= 40 and bbox.y1 >= 260
+    # bbox must enclose the larger blob (with a few pixels of morphological-close slop)
+    # and must NOT extend into the smaller blob's region.
+    assert 270 <= bbox.x0 <= 290 and 370 <= bbox.x1 <= 390
+    assert 190 <= bbox.y0 <= 210 and 250 <= bbox.y1 <= 270
 
 
 def test_accepts_path_pil_and_array(tmp_path: Path) -> None:
@@ -74,6 +84,27 @@ def test_accepts_path_pil_and_array(tmp_path: Path) -> None:
     from_path = detect_sample_bbox(path)
     # JPEG would smear edges; PNG round-trips losslessly so all three must agree.
     assert from_arr == from_pil == from_path
+
+
+def test_ignores_canvas_black_gaps_in_overview() -> None:
+    """Regression: a gappy stitched overview (RGB 0,0,0 between tiles) must
+    not be classified as dark tissue.
+
+    On the real scope, an overview with step > tile-size produces a canvas with
+    large black gutters. A previous version's Otsu pass treated those gutters
+    as the darkest region (= tissue) and inflated the bbox to cover everything.
+    Here we paste a small tissue blob into a mostly-black canvas and assert the
+    bbox snaps to the blob, not the canvas.
+    """
+    canvas = np.zeros((400, 400, 3), dtype=np.uint8)  # mostly canvas-black
+    # One textured "tissue" tile at (200, 200) -- bright/varied, not pure black.
+    rng = np.random.default_rng(seed=42)
+    tile = rng.integers(60, 180, size=(60, 60, 3), dtype=np.uint8)
+    canvas[200:260, 200:260] = tile
+    bbox = detect_sample_bbox(canvas, min_area_frac=0.0001)
+    # Bbox should snap to the tile within a few pixels of morphological close.
+    assert 195 <= bbox.x0 <= 205 and 195 <= bbox.y0 <= 205
+    assert 255 <= bbox.x1 <= 268 and 255 <= bbox.y1 <= 268
 
 
 def test_accepts_rgb_array() -> None:
@@ -124,10 +155,14 @@ def test_plan_grid_respects_overlap() -> None:
         tile_size_px=(200, 200),
         overlap=0.2,
     )
-    # 200 * (1 - 0.2) = 160 step. 1000/160 = 6.25 -> 7 cols. 800/160 = 5 -> 5 rows.
+    # 200 * (1 - 0.2) = 160 step.
+    # cols: ceil((1000 - 200) / 160) + 1 = ceil(800/160) + 1 = 6  (covers [0, 1000])
+    # rows: ceil((800 - 200) / 160) + 1 = ceil(600/160) + 1 = 5
     assert plan.step_x == 160 and plan.step_y == 160
-    assert (plan.rows, plan.cols) == (5, 7)
+    assert (plan.rows, plan.cols) == (5, 6)
     assert plan.positions[0] == (5000, 6000)
+    # Last col anchor at c=5: 5000 + 5*160 = 5800; tile right edge: 5800+200 = 6000.
+    assert plan.positions[1] == (5160, 6000)
     assert plan.bbox_stage == BBox(5000, 6000, 6000, 6800)
 
 
@@ -147,6 +182,46 @@ def test_plan_grid_handles_rotated_csm() -> None:
     )
     assert (plan.rows, plan.cols) == (1, 1)
     assert len(plan.positions) == 1
+
+
+def test_plan_grid_rotated_csm_produces_image_space_overlap() -> None:
+    """Regression: a rotated CSM must produce stage steps that overlap *in image space*.
+
+    With a 90-deg rotated CSM the image's x-axis maps mostly to stage-y, so the
+    per-tile stage motion between camera-adjacent tiles is mostly along stage-y,
+    not stage-x. A previous version stepped along stage axes directly and
+    produced zero-overlap (disconnected) tiles on the real scope.
+    """
+    import numpy as np
+
+    csm = [[0.01, -4.4], [-4.37, 0.0]]
+    tw, th = 832, 624
+    # Bbox big enough that we'll plan a real 3x3 grid (3 tiles needed each way).
+    plan = plan_tile_grid(
+        BBox(0, 0, 3 * tw, 3 * th),
+        overview_origin_stage=(0, 0),
+        overview_csm=csm,
+        tile_size_px=(tw, th),
+        overlap=0.2,
+    )
+    assert plan.rows >= 2 and plan.cols >= 2
+    # Project the actual planned stage positions back into image space using the
+    # inverse CSM. Adjacent (camera-) col tiles should differ by ~tile_w * (1-overlap)
+    # in image-x and ~0 in image-y (NOT the other way round).
+    csm_arr = np.asarray(csm, dtype=float)
+    csm_inv = np.linalg.inv(csm_arr)
+    p0 = np.array(plan.positions[0])  # row 0, col 0
+    p1 = np.array(plan.positions[1])  # row 0, col 1 (snake order: same row, next col)
+    delta_px = csm_inv @ (p1 - p0)
+    # Expected step in image-x is ~tw * (1 - 0.2) = 665.6 pixels
+    expected_step = tw * (1.0 - 0.2)
+    assert abs(delta_px[0]) > 0.5 * expected_step, (
+        f"camera-col step has too little image-x motion: {delta_px[0]:.1f} px "
+        f"(expected ~{expected_step:.0f})"
+    )
+    assert abs(delta_px[1]) < 0.2 * th, (
+        f"camera-col step should not move much in image-y: got {delta_px[1]:.1f} px"
+    )
 
 
 def test_plan_grid_rejects_empty_bbox() -> None:

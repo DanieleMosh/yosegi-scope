@@ -36,8 +36,8 @@ service → a web **front end**.
 - `src/yosegi/acquire.py` — drive the scope, raster the grid, write tiles + manifest.
 - `src/yosegi/stitch.py` — place tiles into a mosaic (coordinates by default).
 - `src/yosegi/survey.py` — detect the sample boundary in an overview, plan a
-  snake-ordered scan over it. Not wired into the CLI yet; consumed by the
-  future `acquire --auto`.
+  snake-ordered scan over it, and orchestrate the full overview→detect→plan→
+  scan→stitch pipeline. Consumed by `yosegi run --auto`.
 - `src/yosegi/cli.py` — Typer app: `acquire`, `stitch`, `run`.
 - `src/yosegi/models.py` — `Tile`, `MosaicResult` dataclasses.
 - `tests/` — pytest; hardware is faked, so no scope is needed to run them.
@@ -95,11 +95,28 @@ exposure blending is left to the library.
 uv run yosegi acquire --host <ip> -o ./tiles --rows 3 --cols 3 --step-x 2000 --step-y 2000
 uv run yosegi stitch  -i ./tiles -o mosaic.jpg [--no-correlate --high-pass-sigma 5]
 uv run yosegi run     --host <ip> -o mosaic.jpg          # acquire then stitch
+uv run yosegi run     --host <ip> -o mosaic.jpg --auto   # whole-slide survey
 ```
+
+`--auto` runs the end-to-end automatic survey: a coarse overview pass
+(`--overview-rows`/`--overview-cols`, `--overview-step-x`/`--overview-step-y`,
+default 5×5 at 2500-step spacing) → `survey.detect_sample_bbox` on the stitched
+overview → `survey.plan_tile_grid` → high-res scan of the planned positions →
+final stitch. With `--auto`, `--rows`/`--cols`/`--step-x`/`--step-y` are
+ignored. Overview tiles and the intermediate overview JPEG land in
+`{out_stem}_overview/` and `{out_stem}_overview.jpg`; high-res tiles in
+`{out_stem}_tiles/`.
+
+The default overview step (2500 stage steps) sits just below the tile's
+stage span on a 40x OpenFlexure (~2750 × ~3636 — see [Capture stats](#capture-stats))
+so the overview canvas has no black gaps that would otherwise inflate the
+detected bbox.
 
 Omit `--host` for mDNS auto-discovery. `--autofocus` is on by default
 (`--no-autofocus` to skip). `--step-x`/`--step-y` are in **stage steps**;
-`--overlap` is metadata only. Errors print a one-line `Error:` and exit 1 (no
+`--overlap` is metadata only for a manual scan, but with `--auto` it sets the
+high-res tile spacing (`plan_tile_grid` strides by `tile_size * (1 - overlap)`),
+so more overlap means more tiles. Errors print a one-line `Error:` and exit 1 (no
 traceback).
 
 ## Library
@@ -131,20 +148,14 @@ which is how tests run without hardware.
 
 Where the project is headed (each is a separate future effort, not yet built):
 
-1. **Automatic whole-slide survey** *(in progress)* — detect the **sample
-   boundary** (low-mag overview + thresholding/segmentation: tissue vs empty
-   slide), then plan a scan that covers the whole sample with overlap. Will
-   replace the user-supplied `--rows`/`--cols` grid in `acquire`. The detection
-   half is in `survey.py` (`detect_sample_bbox`, `plan_tile_grid`); the
-   overview-acquisition and `acquire --auto` wiring are a follow-up.
-2. **Post-processing** — flat-field/illumination correction, seam exposure
+1. **Post-processing** *(next)* — flat-field/illumination correction, seam exposure
    blending, white-balance/contrast normalisation, optional denoising. Likely a new
    `postprocess.py` step applied to (or within) the stitch output.
-3. **Brightfield → fluorescence** — a deep-learning model for virtual staining /
+2. **Brightfield → fluorescence** — a deep-learning model for virtual staining /
    modality translation on the mosaic. New inference module + model dependency.
-4. **API** — wrap acquire/stitch/postprocess/survey/inference behind **FastAPI +
+3. **API** — wrap acquire/stitch/postprocess/survey/inference behind **FastAPI +
    Pydantic** models for programmatic and remote control.
-5. **Front end** — web UI over the API to launch scans, watch progress, and
+4. **Front end** — web UI over the API to launch scans, watch progress, and
    browse/zoom mosaics.
 
 When picking up any of these, keep the existing conventions (Protocol-based DI,
