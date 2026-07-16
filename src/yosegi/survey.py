@@ -193,7 +193,9 @@ def _tissue_mask_array(
             return np.zeros_like(gray, dtype=bool)
         try:
             t = threshold_otsu(vals)
-        except Exception:
+        except ValueError:
+            # threshold_otsu raises ValueError on a degenerate (near-constant)
+            # histogram the range check above didn't already catch.
             return np.zeros_like(gray, dtype=bool)
         picked = (channel > t) if invert else (channel < t)
         return picked & valid
