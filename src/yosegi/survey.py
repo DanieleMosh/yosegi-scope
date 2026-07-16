@@ -25,6 +25,8 @@ if TYPE_CHECKING:
     import numpy as np
     from PIL.Image import Image as PILImage
 
+    from yosegi.models import Tile
+
     ImageInput = str | Path | PILImage | np.ndarray
 
 
@@ -462,7 +464,7 @@ def run_auto_survey(
 
 
 def _stitch_overview_by_stage(
-    overview_tiles: list,
+    overview_tiles: list[Tile],
     csm: list[list[float]],
 ) -> tuple[PILImage, tuple[int, int]]:
     """Paste overview tiles onto a single canvas using stage + CSM only.
