@@ -9,16 +9,17 @@ aligns them, and merges them into a single seamless composite — no manual
 stitching required.
 
 The longer-term goal is a self-driving digital-pathology pipeline: the microscope
-detects the sample's extent and **surveys the whole slide automatically**, the scan
-is cleaned with **image post-processing**, a model performs **brightfield →
-fluorescence** translation, and the whole thing is exposed as an **API** behind a
-web **front end**. See the [Roadmap](#roadmap).
+**finds the tissue and surveys only the tissue automatically**, the scan is cleaned
+with **image post-processing**, a model performs **brightfield → fluorescence**
+translation, and the whole thing is exposed as an **API** behind a web **front
+end**. See the [Roadmap](#roadmap).
 
 > **Status:** the automatic whole-slide survey works end-to-end. `yosegi run
-> --auto` captures a coarse overview, detects the sample boundary, plans a
-> high-resolution scan over it, runs that scan, and stitches the final mosaic —
-> no manually specified grid required. The manual `acquire` and `stitch`
-> commands are unchanged.
+> --auto` captures a coarse overview, detects **every tissue region** on it, plans
+> a **tissue-gated** high-resolution scan that **skips the empty slide** between
+> and around the sections, runs that scan, and stitches the final mosaic — no
+> manually specified grid required. The manual `acquire` and `stitch` commands are
+> unchanged.
 
 ![Example stitched mosaic](docs/example_mosaic.jpg)
 
@@ -38,14 +39,21 @@ so the cell structure stays continuous across seams.*
   scaling) and refines with high-pass phase correlation + a least-squares global
   optimisation. `--no-correlate` does stage+affine placement only, which is reliable
   on faint samples where correlation can't connect tiles.
-- **Survey (`--auto`)** — coarse overview pass, classical segmentation (Otsu
-  intensity + local variance + morphological close) to find the sample
-  boundary, plan a high-resolution snake-ordered scan over it, then execute
-  and stitch. No manual `--rows`/`--cols` required.
-- **Post-process** *(next)* — standard techniques to make the composite cleaner and
-  more accurate: flat-field / illumination correction to remove vignetting, seam
-  exposure blending so tile edges disappear, white balance / contrast normalisation,
-  and optional denoising and background flattening.
+- **Survey (`--auto`)** — coarse overview pass, then classical tissue
+  segmentation (no ML) that unions three cues: **saturation** (stained tissue is
+  coloured while glass is near-grey — the digital-pathology standard),
+  **intensity** (Otsu; tissue is darker), and **texture** (local variance; tissue
+  is textured). Every tissue region is detected — a slide with several sections is
+  fully surveyed — and the high-resolution snake scan is **tissue-gated**: a tile
+  is captured only if its centre falls on tissue, so the empty slide between
+  regions is skipped. Then execute and stitch. No manual `--rows`/`--cols`
+  required.
+- **Focus map** *(next)* — set each tile's focus from a per-region Z surface fitted
+  to a few in-tissue autofocus points, instead of re-focusing at every tile.
+- **Post-process** — standard techniques to make the composite cleaner and more
+  accurate: flat-field / illumination correction to remove vignetting, seam
+  exposure blending so tile edges disappear, white balance / contrast
+  normalisation, and optional denoising and background flattening.
 
 ## Requirements
 
@@ -84,11 +92,20 @@ uv run yosegi stitch --input ./tiles --output mosaic.jpg --no-correlate
 # Acquire then stitch in one pass
 uv run yosegi run --host microscope.local --output mosaic.jpg
 
-# Automatic whole-slide survey: detect the sample boundary, plan and run the scan
+# Automatic whole-slide survey: find every tissue region, scan only the tissue
 uv run yosegi run --auto --host microscope.local --output mosaic.jpg \
     --overview-rows 5 --overview-cols 5 \
     --overview-step-x 2500 --overview-step-y 2500
+
+# Survey only the largest tissue region (skip smaller sections / debris)
+uv run yosegi run --auto --host microscope.local --output mosaic.jpg --max-regions 1
 ```
+
+With `--auto`, the coarse overview lands in `mosaic_overview/` (+ a stitched
+`mosaic_overview.jpg`) and the tissue-gated high-resolution tiles in
+`mosaic_tiles/` — a sparse, densely-renumbered set, fewer than a full grid when
+the tissue is patchy. `--min-area-frac` sets the smallest region (as a fraction
+of the overview) that counts as tissue rather than a speck.
 
 If `--host` is omitted, the microscope is discovered automatically via mDNS.
 
@@ -115,16 +132,25 @@ Done:
 - [x] Acquisition raster (XY grid, autofocus, capture) — `acquire.py`.
 - [x] Stitching via `openflexure-stitching` (EXIF stage coords + CSM affine matrix).
 - [x] CI (ruff + pytest).
-- [x] **Sample boundary detection** in `survey.py` — `detect_sample_bbox`
-  (Otsu intensity + local variance + morphological close) and `plan_tile_grid`
-  (snake-ordered absolute stage positions over the detected bbox).
+- [x] **Multi-region tissue detection** in `survey.py` — `detect_sample_regions`
+  (saturation ∪ intensity ∪ texture cues → all tissue regions, not just one),
+  with `detect_sample_bbox` kept as a single-bbox convenience wrapper.
+- [x] **Tissue-gated scan planning** — `plan_survey` rasters a snake grid over the
+  detected tissue and keeps only tiles whose centre lands on tissue, skipping the
+  empty slide (`plan_tile_grid` remains for a dense grid).
 - [x] **Automatic whole-slide survey end-to-end** behind `yosegi run --auto` —
-  coarse overview pass, detect, plan, run the high-res scan, stitch.
+  coarse overview, detect every region, plan the tissue-gated scan, run it, stitch.
 
-**Now — post-processing.** Apply standard techniques to the stitched composite for a
-cleaner result: flat-field / illumination correction, seam exposure blending,
-white-balance and contrast normalisation, and optional denoising. Goal: a
-mosaic with no visible tile seams or vignetting.
+**Now — per-region focus & post-processing.**
+
+- **Focus map** *(next, biggest remaining scan-quality win)*. Autofocus at a few
+  in-tissue points per region, fit a Z surface (e.g. `scipy.interpolate`), and set
+  the focus per tile without re-focusing at each one — the "focus surface" approach
+  used by automated slide scanners. Pairs with the existing `--autofocus-once`.
+- **Post-processing.** Standard techniques to clean the stitched composite:
+  flat-field / illumination correction, seam exposure blending, white-balance and
+  contrast normalisation, optional denoising. Goal: no visible tile seams or
+  vignetting.
 
 Planned, in order:
 

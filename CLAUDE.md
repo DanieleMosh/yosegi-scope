@@ -9,11 +9,13 @@ Guidance for working in this repository.
 XY grid, fetching overlapping image tiles over the local network, then aligns and
 merges them into one seamless composite — no manual stitching.
 
-The intended trajectory (see [Direction](#direction)) is a self-driving
-digital-pathology pipeline: image **post-processing** for cleaner scans → automatic
-**whole-slide survey** (detect the sample boundary, no user-defined grid) →
-**brightfield→fluorescence** deep-learning translation → a **Pydantic/FastAPI**
-service → a web **front end**.
+The automatic **whole-slide survey** already works (`yosegi run --auto`): it
+detects every tissue region in a coarse overview and runs a tissue-gated
+high-resolution scan that skips the empty slide — no user-defined grid. The
+intended trajectory from here (see [Direction](#direction)) is a self-driving
+digital-pathology pipeline: per-region **focus map** and image
+**post-processing** for cleaner scans → **brightfield→fluorescence** deep-learning
+translation → a **Pydantic/FastAPI** service → a web **front end**.
 
 ## Tech stack
 
@@ -153,14 +155,21 @@ which is how tests run without hardware.
 
 Where the project is headed (each is a separate future effort, not yet built):
 
-1. **Post-processing** *(next)* — flat-field/illumination correction, seam exposure
+1. **Focus map** *(next)* — the automatic survey currently autofocuses per tile
+   (or once, `--autofocus-once`). The next win is a per-region focus surface:
+   autofocus at a few in-tissue points per region, fit a smooth Z(x, y) (e.g.
+   `scipy.interpolate.RBFInterpolator` / `griddata`), and set each planned tile's
+   Z from that surface instead of re-focusing — the "focus surface" model used by
+   automated slide scanners. Fits into `survey.plan_survey` (attach a Z per
+   position) + `acquire.fetch_tiles_at_positions` (honour it).
+2. **Post-processing** — flat-field/illumination correction, seam exposure
    blending, white-balance/contrast normalisation, optional denoising. Likely a new
    `postprocess.py` step applied to (or within) the stitch output.
-2. **Brightfield → fluorescence** — a deep-learning model for virtual staining /
+3. **Brightfield → fluorescence** — a deep-learning model for virtual staining /
    modality translation on the mosaic. New inference module + model dependency.
-3. **API** — wrap acquire/stitch/postprocess/survey/inference behind **FastAPI +
+4. **API** — wrap acquire/stitch/postprocess/survey/inference behind **FastAPI +
    Pydantic** models for programmatic and remote control.
-4. **Front end** — web UI over the API to launch scans, watch progress, and
+5. **Front end** — web UI over the API to launch scans, watch progress, and
    browse/zoom mosaics.
 
 When picking up any of these, keep the existing conventions (Protocol-based DI,
