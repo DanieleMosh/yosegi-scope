@@ -193,26 +193,37 @@ def fetch_tiles_at_positions(
     *,
     rows: int,
     cols: int,
+    rowcols: list[tuple[int, int]] | None = None,
     autofocus: bool = False,
     autofocus_once: bool = False,
     calibrate: bool = False,
 ) -> list[Tile]:
     """Capture one tile at each absolute stage ``(x, y)`` in ``positions``.
 
-    Used by the auto-survey pipeline to execute a :class:`~yosegi.survey.ScanPlan`
-    that was computed from a detected bounding box. ``positions`` is assumed to
-    cover a ``rows x cols`` snake-ordered grid (the planner's output); the
-    ``(row, col)`` for each position is derived from its index so EXIF and
-    filenames stay consistent with ``fetch_tiles``. The scope returns to its
-    starting position when done. ``autofocus_once`` autofocuses only at the
-    first tile and keeps that focus for the rest. Pass ``calibrate=True`` to run
-    camera-stage mapping when the scope has none stored.
+    Used by the auto-survey pipeline to execute a :class:`~yosegi.survey.ScanPlan`.
+    Each position gets a ``(row, col)`` for its EXIF/filename: pass ``rowcols``
+    (parallel to ``positions``) for a tissue-gated **sparse** plan where
+    ``len(positions) != rows * cols``; omit it and the grid is assumed dense and
+    the indices are derived from snake order over ``rows x cols`` (as
+    ``fetch_tiles`` does). The scope moves to ``positions[0]`` before the first
+    capture and returns to its starting position when done. ``autofocus_once``
+    autofocuses only at the first tile and keeps that focus for the rest. Pass
+    ``calibrate=True`` to run camera-stage mapping when the scope has none stored.
     """
     if rows < 1 or cols < 1:
         raise AcquisitionError("rows and cols must be >= 1")
-    if len(positions) != rows * cols:
+    if not positions:
+        raise AcquisitionError("positions must not be empty")
+    if rowcols is None:
+        if len(positions) != rows * cols:
+            raise AcquisitionError(
+                f"positions has {len(positions)} entries but rows*cols = {rows * cols}; "
+                f"pass rowcols for a sparse plan"
+            )
+        rowcols = list(snake_cells(rows, cols))
+    elif len(rowcols) != len(positions):
         raise AcquisitionError(
-            f"positions has {len(positions)} entries but rows*cols = {rows * cols}"
+            f"rowcols has {len(rowcols)} entries but positions has {len(positions)}"
         )
 
     out_dir = Path(out_dir)
@@ -224,8 +235,7 @@ def fetch_tiles_at_positions(
     csm = _get_csm(client, calibrate)
     start = dict(client.position)
 
-    snake = list(snake_cells(rows, cols))
-    plan = [(r, c, x, y) for (r, c), (x, y) in zip(snake, positions, strict=True)]
+    plan = [(r, c, x, y) for (r, c), (x, y) in zip(rowcols, positions, strict=True)]
 
     # _capture_at_plan skips the move before its first entry (correct for
     # fetch_tiles, whose plan[0] is the current position). Here plan[0] is an

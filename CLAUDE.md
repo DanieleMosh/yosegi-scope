@@ -35,9 +35,11 @@ service → a web **front end**.
 
 - `src/yosegi/acquire.py` — drive the scope, raster the grid, write tiles + manifest.
 - `src/yosegi/stitch.py` — place tiles into a mosaic (coordinates by default).
-- `src/yosegi/survey.py` — detect the sample boundary in an overview, plan a
-  snake-ordered scan over it, and orchestrate the full overview→detect→plan→
-  scan→stitch pipeline. Consumed by `yosegi run --auto`.
+- `src/yosegi/survey.py` — detect every tissue region in an overview
+  (`detect_sample_regions`), plan a **tissue-gated** snake scan that skips empty
+  tiles (`plan_survey`), and orchestrate the full overview→detect→plan→scan→
+  stitch pipeline. Consumed by `yosegi run --auto`. `detect_sample_bbox` /
+  `plan_tile_grid` remain as single-bbox / dense-grid helpers.
 - `src/yosegi/cli.py` — Typer app: `acquire`, `stitch`, `run`.
 - `src/yosegi/models.py` — `Tile`, `MosaicResult` dataclasses.
 - `tests/` — pytest; hardware is faked, so no scope is needed to run them.
@@ -100,12 +102,15 @@ uv run yosegi run     --host <ip> -o mosaic.jpg --auto   # whole-slide survey
 
 `--auto` runs the end-to-end automatic survey: a coarse overview pass
 (`--overview-rows`/`--overview-cols`, `--overview-step-x`/`--overview-step-y`,
-default 5×5 at 2500-step spacing) → `survey.detect_sample_bbox` on the stitched
-overview → `survey.plan_tile_grid` → high-res scan of the planned positions →
-final stitch. With `--auto`, `--rows`/`--cols`/`--step-x`/`--step-y` are
-ignored. Overview tiles and the intermediate overview JPEG land in
-`{out_stem}_overview/` and `{out_stem}_overview.jpg`; high-res tiles in
-`{out_stem}_tiles/`.
+default 5×5 at 2500-step spacing) → `survey.detect_sample_regions` on the
+stitched overview (all tissue regions, `--max-regions` to cap) →
+`survey.plan_survey` (a **tissue-gated** grid — tiles whose centre misses the
+tissue are skipped, so empty slide between sections is not scanned) → high-res
+scan of the planned positions → final stitch. With `--auto`,
+`--rows`/`--cols`/`--step-x`/`--step-y` are ignored. Overview tiles and the
+intermediate overview JPEG land in `{out_stem}_overview/` and
+`{out_stem}_overview.jpg`; high-res tiles in `{out_stem}_tiles/` (a sparse,
+densely-renumbered set — fewer than a full grid when tissue is patchy).
 
 The default overview step (2500 stage steps) sits just below the tile's
 stage span on a 40x OpenFlexure (~2750 × ~3636 — see [Capture stats](#capture-stats))

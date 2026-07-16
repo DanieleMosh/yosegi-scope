@@ -14,6 +14,7 @@ dependencies = [
     "openflexure-stitching>=0.2.5",
     "pillow>=9.5.0",
     "scikit-image>=0.22",
+    "scipy>=1.10",
     "typer>=0.25.1",
 ]
 
