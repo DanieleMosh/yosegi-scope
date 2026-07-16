@@ -54,14 +54,24 @@ def test_ignores_tiny_speck_below_area_threshold() -> None:
         detect_sample_bbox(img)
 
 
-def test_two_blobs_yield_union_bbox() -> None:
+def test_two_blobs_yield_largest_bbox() -> None:
+    """Two disconnected blobs: the bbox snaps to the larger one.
+
+    Old behaviour was to return the union of all surviving components, but on
+    real overviews that lets a single scattered speck of camera noise near an
+    empty corner inflate the bbox to cover the whole image. The current policy
+    is to return the bbox of the *largest* component, which keeps detection
+    robust to noise; a multi-region slide can still be re-surveyed with a
+    smaller ``min_area_frac`` if both blobs are important.
+    """
     img = np.full((300, 400), 240, dtype=np.uint8)
-    img[40:90, 50:120] = 40   # top-left blob
-    img[200:260, 280:360] = 40  # bottom-right blob
+    img[40:90, 50:120] = 40        # smaller blob (50x70 = 3500 px)
+    img[200:260, 280:380] = 40     # larger blob (60x100 = 6000 px)
     bbox = detect_sample_bbox(img)
-    # union must enclose both blobs
-    assert bbox.x0 <= 50 and bbox.x1 >= 360
-    assert bbox.y0 <= 40 and bbox.y1 >= 260
+    # bbox must enclose the larger blob (with a few pixels of morphological-close slop)
+    # and must NOT extend into the smaller blob's region.
+    assert 270 <= bbox.x0 <= 290 and 370 <= bbox.x1 <= 390
+    assert 190 <= bbox.y0 <= 210 and 250 <= bbox.y1 <= 270
 
 
 def test_accepts_path_pil_and_array(tmp_path: Path) -> None:

@@ -91,9 +91,11 @@ def detect_sample_bbox(
     Otsu-thresholded *intensity* (tissue is darker than the white background)
     and *local variance* (tissue is textured, the background is flat). The
     masks are OR-ed, morphologically closed, then split into connected
-    components; any component whose area is below ``min_area_frac`` of the
-    image is discarded as a speck. The returned :class:`BBox` is the union of
-    all surviving components.
+    components; components smaller than ``min_area_frac`` of the image are
+    discarded as specks, and the bbox of the **largest remaining component**
+    is returned. The largest-component policy keeps scattered noise (dust /
+    vignetting / camera speckle near an empty corner) from being unioned with
+    the real sample and inflating the bbox to the whole image.
 
     If the overview comes from a stitched canvas with un-tiled gaps (pixels at
     exactly RGB ``(0, 0, 0)``), those gaps are masked out before either cue is
@@ -148,8 +150,6 @@ def detect_sample_bbox(
     mask = intensity_mask | texture_mask
     if close_radius > 0:
         mask = binary_closing(mask, disk(int(close_radius)))
-    # Closing can grow into the canvas region; clip back so detected components
-    # never include canvas pixels.
     mask &= valid
 
     labelled = label(mask, connectivity=2)
@@ -160,11 +160,8 @@ def detect_sample_bbox(
             "no sample detected in overview; check focus/exposure or pass a tighter ROI"
         )
 
-    # Union of all kept components, in (y0, x0, y1, x1) skimage order -> BBox.
-    y0 = min(r.bbox[0] for r in components)
-    x0 = min(r.bbox[1] for r in components)
-    y1 = max(r.bbox[2] for r in components)
-    x1 = max(r.bbox[3] for r in components)
+    largest = max(components, key=lambda r: r.area)
+    y0, x0, y1, x1 = largest.bbox
     return BBox(x0=int(x0), y0=int(y0), x1=int(x1), y1=int(y1))
 
 

@@ -104,27 +104,30 @@ class _Scope:
 @requires_ofs
 def test_run_auto_survey_full_pipeline(tmp_path: Path) -> None:
     out = tmp_path / "mosaic.jpg"
-    scope = _Scope(sample_x_range=(-150, 150), sample_y_range=(-150, 150), tile_size=(60, 60))
+    # Make the sample large enough that the detected bbox is at least 2x2 tiles,
+    # so plan_tile_grid yields several tiles for the final stitch.
+    # Overview step < tile size so synthetic tile blobs join into one component.
+    scope = _Scope(sample_x_range=(-300, 300), sample_y_range=(-300, 300), tile_size=(60, 60))
     result = run_auto_survey(
         client=scope,
         out_file=out,
-        overview_rows=5,
-        overview_cols=5,
-        overview_step_x=80,
-        overview_step_y=80,
+        overview_rows=7,
+        overview_cols=7,
+        overview_step_x=40,
+        overview_step_y=40,
         overlap=0.2,
         autofocus=False,
         correlate=False,  # stage-only stitch -> deterministic, no correlation flakiness
         min_area_frac=0.005,
     )
     assert out.exists() and result.path == out
-    assert result.tile_count > 0
+    assert result.tile_count > 1  # planned grid must be more than 1 tile
     # Overview side-products land alongside the mosaic for debugging.
     assert (tmp_path / "mosaic_overview.jpg").exists()
     assert (tmp_path / "mosaic_overview").is_dir()
     assert (tmp_path / "mosaic_tiles").is_dir()
-    # Overview pass came first (5 * 5 = 25 captures), then the planned scan.
-    assert scope.captures > 25
+    # Overview pass came first (7 * 7 = 49 captures), then the planned scan.
+    assert scope.captures > 49
 
 
 def test_run_auto_survey_raises_when_overview_has_no_sample(tmp_path: Path) -> None:
