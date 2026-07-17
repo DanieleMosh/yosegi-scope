@@ -181,6 +181,7 @@ def main(argv: list[str] | None = None) -> int:
     t0 = time.time()
     survey_ok = False
     survey_err: str | None = None
+    stage_only_stitch = False
     try:
         result = run_auto_survey(
             client=scope,
@@ -200,7 +201,31 @@ def main(argv: list[str] | None = None) -> int:
             f"[e2e] survey finished in {time.time() - t0:.1f}s: "
             f"{result.width}x{result.height} mosaic from {result.tile_count} tiles"
         )
-    except (AcquisitionError, SurveyError, FocusError, StitchError) as exc:
+    except StitchError as exc:
+        # The scan (overview + detect + focus + capture) succeeded but correlation
+        # stitching disconnected tiles -- the documented failure mode on faint /
+        # low-texture samples. The high-res tiles are already on disk, so retry the
+        # stitch with stage+affine placement only (no re-scan, no stage motion).
+        survey_err = f"{type(exc).__name__}: {exc}"
+        print(f"[e2e] correlation stitch failed: {survey_err}", file=sys.stderr)
+        if args.correlate:
+            from yosegi.stitch import stitch_tiles
+
+            tiles_dir = args.out_dir / f"{out_file.stem}_tiles"
+            print("[e2e] retrying stitch with --no-correlate (stage+affine placement) ...")
+            try:
+                result = stitch_tiles(in_dir=tiles_dir, out_file=out_file, correlate=False)
+                survey_ok = True
+                stage_only_stitch = True
+                survey_err = None
+                print(
+                    f"[e2e] stage-only stitch OK: {result.width}x{result.height} mosaic "
+                    f"from {result.tile_count} tiles"
+                )
+            except StitchError as exc2:
+                survey_err = f"stage-only stitch also failed: {type(exc2).__name__}: {exc2}"
+                print(f"[e2e] {survey_err}", file=sys.stderr)
+    except (AcquisitionError, SurveyError, FocusError) as exc:
         survey_err = f"{type(exc).__name__}: {exc}"
         print(f"[e2e] survey FAILED after {time.time() - t0:.1f}s: {survey_err}", file=sys.stderr)
     finally:
@@ -211,7 +236,10 @@ def main(argv: list[str] | None = None) -> int:
         except Exception as exc:
             print(f"[e2e] WARNING: could not return stage to start: {exc}", file=sys.stderr)
 
-    checks: list[Check] = [Check("survey completed", survey_ok, survey_err or "ran to completion")]
+    detail = "ran to completion"
+    if survey_ok and stage_only_stitch:
+        detail = "ran to completion (correlation disconnected tiles; stage-only stitch used)"
+    checks: list[Check] = [Check("survey completed", survey_ok, survey_err or detail)]
     if survey_ok:
         checks.extend(validate(out_file, expect_focus_map=args.focus_map))
 
