@@ -52,9 +52,12 @@ class _Scope:
         self.sample_x_range = sample_x_range
         self.sample_y_range = sample_y_range
         self.captures = 0
+        self.autofocus_calls = 0
         self.visited: list[tuple[int, int]] = []
         # Identity CSM -> 1 pixel = 1 stage step, no rotation.
         self.csm = [[1.0, 0.0], [0.0, 1.0]]
+        # Focus plane z = 0.01*x + 0.02*y + 200; autofocus lands the stage on it.
+        self._focus = (0.01, 0.02, 200.0)
 
     @property
     def position(self) -> dict[str, int]:
@@ -83,7 +86,9 @@ class _Scope:
         self.move(position, absolute=False)
 
     def autofocus(self, dz: int = 2000) -> None:
-        pass
+        self.autofocus_calls += 1
+        a, b, c = self._focus
+        self._pos["z"] = int(round(a * self._pos["x"] + b * self._pos["y"] + c))
 
     def capture_image(self) -> PIL.Image.Image:
         self.captures += 1
@@ -184,6 +189,44 @@ def test_run_auto_survey_skips_empty_tiles_between_regions(tmp_path: Path) -> No
         tile_size_px=(60, 60), overlap=0.2,
     )
     assert gated.tile_count < dense.tile_count
+
+
+@requires_ofs
+def test_run_auto_survey_focus_map_replaces_per_tile_autofocus(tmp_path: Path) -> None:
+    """With focus_map=True the scope autofocuses only at the focus-sample points,
+    not once per high-res tile, and each tile's Z follows the fitted plane."""
+    out = tmp_path / "mosaic.jpg"
+    scope = _Scope(sample_x_range=(0, 320), sample_y_range=(0, 320), tile_size=(60, 60))
+    result = run_auto_survey(
+        client=scope,
+        out_file=out,
+        overview_rows=9,
+        overview_cols=9,
+        overview_step_x=40,
+        overview_step_y=40,
+        overlap=0.2,
+        autofocus=False,
+        autofocus_once=False,
+        correlate=False,
+        min_area_frac=0.002,
+        focus_map=True,
+        focus_points_per_region=5,
+    )
+    assert out.exists()
+    highres_tiles = result.tile_count
+    # Autofocus ran only while sampling the focus map (a small, bounded number of
+    # points), NOT once per high-res tile.
+    assert 0 < scope.autofocus_calls <= 5  # one region, up to 5 sample points
+    assert scope.autofocus_calls < highres_tiles
+
+    # Each captured high-res tile carries a Z from the fitted plane
+    # (z = 0.01*x + 0.02*y + 200), i.e. clearly non-zero and stage-dependent.
+    import json
+
+    manifest = json.loads((tmp_path / "mosaic_tiles" / "manifest.json").read_text())
+    zs = [t["stage_z"] for t in manifest["tiles"]]
+    assert all(z is not None and z > 100 for z in zs)
+    assert len(set(zs)) > 1  # the plane tilts, so tile Z varies across the scan
 
 
 @requires_ofs

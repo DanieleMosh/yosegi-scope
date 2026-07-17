@@ -178,6 +178,19 @@ def run(
         help="Autofocus only on the first tile and reuse that focus for the rest "
              "(faster on flat samples). Ignored if --autofocus is on; pair with --no-autofocus.",
     ),
+    focus_map: bool = typer.Option(
+        False,
+        "--focus-map",
+        help="Build a per-region focus surface (--auto only): autofocus at a few in-tissue "
+             "points per region, fit Z(x,y), and set each tile's focus from it instead of "
+             "autofocusing at every tile. Overrides --autofocus/--autofocus-once for the scan.",
+    ),
+    focus_points_per_region: int = typer.Option(
+        5,
+        "--focus-points-per-region",
+        min=1,
+        help="Autofocus samples per tissue region when --focus-map is on.",
+    ),
     overlap: float = typer.Option(
         0.2,
         "--overlap",
@@ -201,6 +214,7 @@ def run(
     that scan and stitches the final mosaic -- no ``--rows``/``--cols`` needed.
     """
     from yosegi.acquire import AcquisitionError, connect, fetch_tiles
+    from yosegi.focus import FocusError
     from yosegi.stitch import StitchError, stitch_tiles
     from yosegi.survey import SurveyError, run_auto_survey
 
@@ -222,6 +236,8 @@ def run(
                 minimum_overlap=minimum_overlap,
                 min_area_frac=min_area_frac,
                 max_regions=max_regions,
+                focus_map=focus_map,
+                focus_points_per_region=focus_points_per_region,
             )
         else:
             tile_dir = output.parent / f"{output.stem}_tiles"
@@ -240,7 +256,7 @@ def run(
                 in_dir=tile_dir, out_file=output, correlate=correlate,
                 high_pass_sigma=high_pass_sigma, minimum_overlap=minimum_overlap,
             )
-    except (AcquisitionError, StitchError, SurveyError) as exc:
+    except (AcquisitionError, StitchError, SurveyError, FocusError) as exc:
         _abort(exc)
     typer.echo(f"Wrote {result.width}x{result.height} mosaic from {result.tile_count} tiles to {result.path}")
 

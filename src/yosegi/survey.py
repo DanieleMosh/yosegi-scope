@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from yosegi.acquire import AcquisitionError, Microscope, fetch_tiles, fetch_tiles_at_positions
+from yosegi.focus import FocusMap, build_focus_map, sample_points_for_region
 from yosegi.models import MosaicResult
 from yosegi.stitch import stitch_tiles
 
@@ -145,6 +146,7 @@ class ScanPlan:
     step_x: int
     step_y: int
     bbox_stage: BBox
+    focus_z: list[int] | None = None
 
     @property
     def tile_count(self) -> int:
@@ -613,6 +615,48 @@ def _densify_rowcols(rowcols: list[tuple[int, int]]) -> list[tuple[int, int]]:
     return dense
 
 
+def _region_bbox_to_stage(
+    bbox: BBox,
+    overview_origin_stage: tuple[int, int],
+    overview_csm: list[list[float]],
+) -> tuple[int, int, int, int]:
+    """Project an overview-pixel ``bbox`` to an axis-aligned stage-step box.
+
+    Returns ``(x0, y0, x1, y1)`` in stage steps -- the same corner-projection
+    :class:`_GridGeometry` uses, exposed for focus-point sampling per region.
+    """
+    import numpy as np
+
+    csm = np.asarray(overview_csm, dtype=float)
+    ox, oy = overview_origin_stage
+    corners_px = np.array(
+        [[bbox.x0, bbox.y0], [bbox.x1, bbox.y0], [bbox.x1, bbox.y1], [bbox.x0, bbox.y1]],
+        dtype=float,
+    )
+    corners_stage = corners_px @ csm.T
+    sx_min, sy_min = corners_stage.min(axis=0)
+    sx_max, sy_max = corners_stage.max(axis=0)
+    return (
+        int(round(ox + sx_min)),
+        int(round(oy + sy_min)),
+        int(round(ox + sx_max)),
+        int(round(oy + sy_max)),
+    )
+
+
+def apply_focus_map(plan: ScanPlan, focus_map: FocusMap) -> ScanPlan:
+    """Return a copy of ``plan`` with each tile's focus Z set from ``focus_map``.
+
+    Evaluates the fitted focus surface at every tile's stage ``(x, y)`` and stores
+    the predicted Z in ``ScanPlan.focus_z``, so the scan can set focus per tile
+    from the surface instead of autofocusing at each one.
+    """
+    from dataclasses import replace
+
+    focus_z = [focus_map.z_at(x, y) for x, y in plan.positions]
+    return replace(plan, focus_z=focus_z)
+
+
 def run_auto_survey(
     client: Microscope,
     out_file: Path,
@@ -629,6 +673,8 @@ def run_auto_survey(
     minimum_overlap: float = 0.2,
     min_area_frac: float = 0.005,
     max_regions: int | None = None,
+    focus_map: bool = False,
+    focus_points_per_region: int = 5,
 ) -> MosaicResult:
     """End-to-end automatic whole-slide survey, driven by an already-connected scope.
 
@@ -646,14 +692,18 @@ def run_auto_survey(
     4. **Plan** a tissue-gated high-resolution scan over the regions via
        :func:`plan_survey` -- tiles whose centre misses the tissue are skipped,
        so blank slide between sections is not scanned.
+    4b. **Focus map** (optional, ``focus_map=True``) -- autofocus at a few
+       in-tissue points per region (``focus_points_per_region`` each), fit a Z
+       surface, and assign each planned tile a Z from it. The scan then sets focus
+       per tile from the map instead of autofocusing at every tile.
     5. **Execute** the plan with
        :func:`yosegi.acquire.fetch_tiles_at_positions` into
        ``{out_file.stem}_tiles/``.
     6. **Stitch** the high-res tiles to ``out_file`` via
        :func:`yosegi.stitch.stitch_tiles`.
 
-    Raises :class:`AcquisitionError`, :class:`SurveyError`, or
-    :class:`StitchError` depending on which stage fails -- the partial outputs
+    Raises :class:`AcquisitionError`, :class:`SurveyError`, :class:`FocusError`,
+    or :class:`StitchError` depending on which stage fails -- the partial outputs
     on disk are left in place for debugging.
     """
     from PIL import Image
@@ -720,8 +770,33 @@ def run_auto_survey(
         overlap=overlap,
     )
 
+    # Stage 4b: optional focus map. Sample autofocus at a few in-tissue points per
+    # region (converted from overview pixels to stage steps), fit a Z surface, and
+    # assign each planned tile its Z. When enabled, the scan sets focus per tile
+    # from the map instead of autofocusing at every tile.
+    scan_autofocus = autofocus
+    scan_autofocus_once = autofocus_once
+    if focus_map:
+        sample_points: list[tuple[int, int]] = []
+        for region in tissue.regions:
+            region_stage = _region_bbox_to_stage(region.bbox, overview_origin_stage, csm)
+            sample_points.extend(
+                sample_points_for_region(region_stage, max_points=focus_points_per_region)
+            )
+        # build_focus_map drives the stage around and leaves it at the last
+        # sample point; restore the pre-sampling position so the scope isn't
+        # parked at a focus point if the scan errors before it repositions.
+        pre_focus_pos = dict(client.position)
+        fmap = build_focus_map(client, sample_points)
+        client.move(pre_focus_pos, absolute=True)
+        plan = apply_focus_map(plan, fmap)
+        # Focus is now decided by the map; don't also autofocus per tile.
+        scan_autofocus = False
+        scan_autofocus_once = False
+
     # Stage 5: execute the (possibly sparse) plan, passing the densely-renumbered
-    # (row, col) so tile filenames stay compact.
+    # (row, col) so tile filenames stay compact, plus per-tile Z when a focus map
+    # was built.
     fetch_tiles_at_positions(
         client=client,
         out_dir=tiles_dir,
@@ -729,8 +804,9 @@ def run_auto_survey(
         rows=plan.rows,
         cols=plan.cols,
         rowcols=plan.rowcols,
-        autofocus=autofocus,
-        autofocus_once=autofocus_once,
+        focus_z=plan.focus_z,
+        autofocus=scan_autofocus,
+        autofocus_once=scan_autofocus_once,
     )
 
     # Stage 6: final stitch.
@@ -803,6 +879,7 @@ __all__ = [
     "ScanPlan",
     "SurveyError",
     "TissueMask",
+    "apply_focus_map",
     "detect_sample_bbox",
     "detect_sample_regions",
     "plan_survey",

@@ -429,3 +429,31 @@ def test_plan_survey_rejects_no_regions() -> None:
             overview_csm=_IDENTITY_CSM,
             tile_size_px=(10, 10),
         )
+
+
+# --- apply_focus_map --------------------------------------------------------
+
+
+def test_apply_focus_map_assigns_per_tile_z() -> None:
+    from yosegi.focus import FocusMap
+    from yosegi.survey import apply_focus_map
+
+    plan = plan_tile_grid(
+        BBox(0, 0, 400, 200),
+        overview_origin_stage=(0, 0),
+        overview_csm=_IDENTITY_CSM,
+        tile_size_px=(200, 200),
+        overlap=0.0,
+    )
+    assert plan.focus_z is None
+    # Plane z = 0.1*x + 0*y + 100, clamped to [100, 140].
+    fmap = FocusMap(coeffs=(0.1, 0.0, 100.0), samples=[(0, 0, 100), (400, 0, 140)],
+                    z_min=100, z_max=140)
+    focused = apply_focus_map(plan, fmap)
+    assert focused.focus_z is not None
+    assert len(focused.focus_z) == len(plan.positions)
+    # Each tile's Z follows the plane at its stage x (clamped to the sampled span).
+    for (x, _y), z in zip(focused.positions, focused.focus_z, strict=True):
+        assert z == max(100, min(140, round(0.1 * x + 100)))
+    # The original plan is untouched (dataclasses.replace returns a copy).
+    assert plan.focus_z is None
