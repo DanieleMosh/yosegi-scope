@@ -71,6 +71,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--overlap", type=float, default=0.2)
     p.add_argument("--min-area-frac", type=float, default=0.005)
     p.add_argument(
+        "--auto-expand",
+        dest="auto_expand",
+        default=False,
+        action=argparse.BooleanOptionalAction,
+        help="Grow the overview outward until the whole sample is enclosed (default: off). "
+             "Use for a sample larger than the initial overview window.",
+    )
+    p.add_argument("--max-expansions", type=int, default=4, help="Overview growth rounds cap.")
+    p.add_argument(
         "--focus-map",
         dest="focus_map",
         default=True,
@@ -86,9 +95,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
-def validate(out_file: Path, *, expect_focus_map: bool) -> list[Check]:
-    """Check the artifacts a successful auto survey must have written."""
+def validate(out_file: Path, *, expect_focus_map: bool, expect_enclosed: bool) -> list[Check]:
+    """Check the artifacts a successful auto survey must have written.
+
+    When ``expect_enclosed`` (auto-expand was on), also verify the final overview
+    no longer clips the sample -- the tissue bbox must not reach any canvas edge.
+    """
+    import numpy as np
     from PIL import Image
+
+    from yosegi.survey import bbox_touches_edges, detect_sample_regions
 
     parent = out_file.parent
     stem = out_file.stem
@@ -114,7 +130,25 @@ def validate(out_file: Path, *, expect_focus_map: bool) -> list[Check]:
     if overview_jpg.exists():
         with Image.open(overview_jpg) as im:
             w, h = im.size
+            arr = np.asarray(im.convert("RGB"))
         checks.append(Check("overview canvas", w > 0 and h > 0, f"{w}x{h} overview.jpg"))
+        # With auto-expand, the final overview must enclose the sample: the
+        # detected tissue bbox must not reach any canvas edge.
+        if expect_enclosed:
+            try:
+                tissue = detect_sample_regions(arr, min_area_frac=0.005)
+                touch = bbox_touches_edges(tissue.bbox, arr.shape[:2])
+                checks.append(
+                    Check(
+                        "sample enclosed (auto-expand)",
+                        not touch.any,
+                        "tissue bordered by empty slide"
+                        if not touch.any
+                        else f"still clipped: {touch} (raise --max-expansions)",
+                    )
+                )
+            except Exception as exc:  # detection failure shouldn't crash the report
+                checks.append(Check("sample enclosed (auto-expand)", False, f"detect failed: {exc}"))
     else:
         checks.append(Check("overview canvas", False, f"missing {overview_jpg}"))
 
@@ -195,6 +229,8 @@ def main(argv: list[str] | None = None) -> int:
             correlate=args.correlate,
             min_area_frac=args.min_area_frac,
             focus_map=args.focus_map,
+            auto_expand=args.auto_expand,
+            max_expansions=args.max_expansions,
         )
         survey_ok = True
         print(
@@ -241,7 +277,9 @@ def main(argv: list[str] | None = None) -> int:
         detail = "ran to completion (correlation disconnected tiles; stage-only stitch used)"
     checks: list[Check] = [Check("survey completed", survey_ok, survey_err or detail)]
     if survey_ok:
-        checks.extend(validate(out_file, expect_focus_map=args.focus_map))
+        checks.extend(
+            validate(out_file, expect_focus_map=args.focus_map, expect_enclosed=args.auto_expand)
+        )
 
     print("\n[e2e] validation report:")
     print(_fmt(checks))
