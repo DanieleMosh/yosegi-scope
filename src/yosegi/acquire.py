@@ -194,6 +194,7 @@ def fetch_tiles_at_positions(
     rows: int,
     cols: int,
     rowcols: list[tuple[int, int]] | None = None,
+    focus_z: list[int] | None = None,
     autofocus: bool = False,
     autofocus_once: bool = False,
     calibrate: bool = False,
@@ -206,9 +207,14 @@ def fetch_tiles_at_positions(
     ``len(positions) != rows * cols``; omit it and the grid is assumed dense and
     the indices are derived from snake order over ``rows x cols`` (as
     ``fetch_tiles`` does). The scope moves to ``positions[0]`` before the first
-    capture and returns to its starting position when done. ``autofocus_once``
-    autofocuses only at the first tile and keeps that focus for the rest. Pass
-    ``calibrate=True`` to run camera-stage mapping when the scope has none stored.
+    capture and returns to its starting position when done.
+
+    Focus: pass ``focus_z`` (parallel to ``positions``) to set each tile's Z from
+    a precomputed focus map -- the stage moves to that Z and no autofocus runs,
+    which is faster and steadier than per-tile autofocus on a tilted slide.
+    Without ``focus_z``, ``autofocus`` refocuses at every tile and
+    ``autofocus_once`` refocuses only at the first. Pass ``calibrate=True`` to run
+    camera-stage mapping when the scope has none stored.
     """
     if rows < 1 or cols < 1:
         raise AcquisitionError("rows and cols must be >= 1")
@@ -224,6 +230,10 @@ def fetch_tiles_at_positions(
     elif len(rowcols) != len(positions):
         raise AcquisitionError(
             f"rowcols has {len(rowcols)} entries but positions has {len(positions)}"
+        )
+    if focus_z is not None and len(focus_z) != len(positions):
+        raise AcquisitionError(
+            f"focus_z has {len(focus_z)} entries but positions has {len(positions)}"
         )
 
     out_dir = Path(out_dir)
@@ -242,14 +252,22 @@ def fetch_tiles_at_positions(
     # arbitrary absolute target, so move there first -- otherwise the whole scan
     # is captured offset by (start - positions[0]) and images the wrong region.
     first_x, first_y = positions[0]
-    client.move({"x": int(first_x), "y": int(first_y), "z": start["z"]}, absolute=True)
+    first_z = int(focus_z[0]) if focus_z is not None else start["z"]
+    client.move({"x": int(first_x), "y": int(first_y), "z": first_z}, absolute=True)
 
     tiles = _capture_at_plan(
         client, out_dir, plan,
-        autofocus=autofocus, autofocus_once=autofocus_once, csm=csm,
+        autofocus=autofocus, autofocus_once=autofocus_once, csm=csm, focus_z=focus_z,
     )
     client.move(start, absolute=True)
-    _write_positions_manifest(out_dir, rows, cols, positions, autofocus, start, csm, tiles)
+    # Record what actually drove focus: a supplied focus map takes precedence, so
+    # no per-tile autofocus ran in that case.
+    used_focus_map = focus_z is not None
+    _write_positions_manifest(
+        out_dir, rows, cols, positions,
+        autofocus=autofocus and not used_focus_map,
+        focus_map=used_focus_map, start=start, csm=csm, tiles=tiles,
+    )
     return tiles
 
 
@@ -261,24 +279,35 @@ def _capture_at_plan(
     autofocus: bool,
     csm: list[list[float]] | None,
     autofocus_once: bool = False,
+    focus_z: list[int] | None = None,
 ) -> list[Tile]:
     """Walk ``plan`` of ``(row, col, abs_x, abs_y)`` and capture one tile per entry.
 
     Uses ``move_rel`` between steps so the scope incurs only the per-step travel,
     not the cumulative distance from the origin. Shared by both ``fetch_tiles``
     (regular snake grid) and ``fetch_tiles_at_positions`` (planned scan).
-    ``autofocus_once`` runs autofocus only at the first tile; ``autofocus`` (when
-    true) runs it at every tile. ``autofocus`` takes precedence if both are set.
+
+    Focus precedence per tile: if ``focus_z`` is given, move Z to
+    ``focus_z[i]`` (a focus map already decided focus, so no autofocus runs);
+    else ``autofocus`` refocuses at every tile and ``autofocus_once`` only at the
+    first. XY always moves relative; Z from a focus map moves relative by the
+    per-step delta so it composes with the running position.
     """
     tiles: list[Tile] = []
     prev: tuple[int, int] | None = None
+    prev_z: int | None = None
     for i, (row, col, abs_x, abs_y) in enumerate(plan):
+        dz = 0
+        if focus_z is not None:
+            target_z = int(focus_z[i])
+            dz = target_z - prev_z if prev_z is not None else 0
+            prev_z = target_z
         if prev is not None:
             dx = abs_x - prev[0]
             dy = abs_y - prev[1]
-            if dx or dy:
-                scope.move_rel({"x": dx, "y": dy, "z": 0})
-        if autofocus or (autofocus_once and i == 0):
+            if dx or dy or dz:
+                scope.move_rel({"x": dx, "y": dy, "z": dz})
+        if focus_z is None and (autofocus or (autofocus_once and i == 0)):
             scope.autofocus()
         image = scope.capture_image()
         path = out_dir / f"tile_r{row:02d}_c{col:02d}.jpg"
@@ -333,7 +362,9 @@ def _write_positions_manifest(
     rows: int,
     cols: int,
     positions: list[tuple[int, int]],
+    *,
     autofocus: bool,
+    focus_map: bool,
     start: dict[str, int],
     csm: list[list[float]] | None,
     tiles: list[Tile],
@@ -344,6 +375,8 @@ def _write_positions_manifest(
     can read the CSM from it, but records the planned ``grid`` extent and the
     absolute target positions instead of a fixed step, since a planned scan may be
     sparse (fewer tiles than ``rows * cols`` once empty tiles are skipped).
+    ``autofocus`` reflects whether per-tile autofocus actually ran; ``focus_map``
+    records whether tile Z came from a precomputed focus surface.
     """
     manifest = {
         "schema": "yosegi.acquire/1",
@@ -351,6 +384,7 @@ def _write_positions_manifest(
         "grid": {"rows": rows, "cols": cols},
         "planned_positions": [[int(x), int(y)] for x, y in positions],
         "autofocus": autofocus,
+        "focus_map": focus_map,
         "camera_stage_mapping": csm,
         "start_position": start,
         "tiles": [_tile_record(t) for t in tiles],

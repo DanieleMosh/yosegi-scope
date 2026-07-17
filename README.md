@@ -48,10 +48,11 @@ so the cell structure stays continuous across seams.*
   is captured only if its centre falls on tissue, so the empty slide between
   regions is skipped. Then execute and stitch. No manual `--rows`/`--cols`
   required.
-- **Focus map** *(next)* — set each tile's focus from a per-region Z surface fitted
-  to a few in-tissue autofocus points, instead of re-focusing at every tile.
-- **Post-process** — standard techniques to make the composite cleaner and more
-  accurate: flat-field / illumination correction to remove vignetting, seam
+- **Focus map (`--focus-map`)** — autofocus at a few in-tissue points per region,
+  fit a Z(x, y) plane, and set each tile's focus from that surface instead of
+  re-focusing at every tile. Faster and steadier on a tilted slide.
+- **Post-process** *(next)* — standard techniques to make the composite cleaner and
+  more accurate: flat-field / illumination correction to remove vignetting, seam
   exposure blending so tile edges disappear, white balance / contrast
   normalisation, and optional denoising and background flattening.
 
@@ -99,6 +100,9 @@ uv run yosegi run --auto --host microscope.local --output mosaic.jpg \
 
 # Survey only the largest tissue region (skip smaller sections / debris)
 uv run yosegi run --auto --host microscope.local --output mosaic.jpg --max-regions 1
+
+# Use a per-region focus map instead of autofocusing at every tile (tilted slides)
+uv run yosegi run --auto --host microscope.local --output mosaic.jpg --focus-map
 ```
 
 With `--auto`, the coarse overview lands in `mosaic_overview/` (+ a stitched
@@ -140,17 +144,14 @@ Done:
   empty slide (`plan_tile_grid` remains for a dense grid).
 - [x] **Automatic whole-slide survey end-to-end** behind `yosegi run --auto` —
   coarse overview, detect every region, plan the tissue-gated scan, run it, stitch.
+- [x] **Per-region focus map** (`focus.py`, `run --auto --focus-map`) — autofocus at
+  a few in-tissue points per region, fit a Z(x, y) plane, and set each tile's focus
+  from that surface instead of re-focusing at every tile.
 
-**Now — per-region focus & post-processing.**
-
-- **Focus map** *(next, biggest remaining scan-quality win)*. Autofocus at a few
-  in-tissue points per region, fit a Z surface (e.g. `scipy.interpolate`), and set
-  the focus per tile without re-focusing at each one — the "focus surface" approach
-  used by automated slide scanners. Pairs with the existing `--autofocus-once`.
-- **Post-processing.** Standard techniques to clean the stitched composite:
-  flat-field / illumination correction, seam exposure blending, white-balance and
-  contrast normalisation, optional denoising. Goal: no visible tile seams or
-  vignetting.
+**Now — post-processing.** Standard techniques to clean the stitched composite:
+flat-field / illumination correction, seam exposure blending, white-balance and
+contrast normalisation, optional denoising. Goal: no visible tile seams or
+vignetting.
 
 Planned, in order:
 

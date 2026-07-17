@@ -225,6 +225,7 @@ def test_positions_scan_writes_manifest(tmp_path: Path) -> None:
     assert manifest["grid"] == {"rows": 1, "cols": 2}
     assert manifest["planned_positions"] == [[10, 20], [30, 20]]
     assert manifest["camera_stage_mapping"] == _CSM
+    assert manifest["focus_map"] is False  # no focus map supplied
     assert len(manifest["tiles"]) == 2
 
 
@@ -233,4 +234,36 @@ def test_positions_scan_rejects_length_mismatch(tmp_path: Path) -> None:
     with pytest.raises(AcquisitionError, match="positions has"):
         fetch_tiles_at_positions(
             client=scope, out_dir=tmp_path, positions=[(0, 0)], rows=2, cols=2,
+        )
+
+
+def test_positions_scan_focus_z_sets_z_and_skips_autofocus(tmp_path: Path) -> None:
+    """With focus_z the scope moves Z per tile (no per-tile autofocus), and each
+    tile records the focus-map Z in EXIF/Tile."""
+    scope = FakeMicroscope(start=(0, 0, 0))
+    positions = [(0, 0), (100, 0), (100, 100), (0, 100)]
+    focus_z = [500, 510, 520, 530]
+    tiles = fetch_tiles_at_positions(
+        client=scope, out_dir=tmp_path, positions=positions,
+        rows=2, cols=2, focus_z=focus_z, autofocus=True,  # autofocus ignored when focus_z given
+    )
+    # focus_z takes precedence over autofocus -> no autofocus calls.
+    assert scope.autofocus_calls == 0
+    # Manifest records that focus came from a map, not per-tile autofocus.
+    manifest = json.loads((tmp_path / "manifest.json").read_text())
+    assert manifest["focus_map"] is True
+    assert manifest["autofocus"] is False
+    by_pos = {(t.stage_x, t.stage_y): t.stage_z for t in tiles}
+    assert by_pos[(0, 0)] == 500
+    assert by_pos[(100, 0)] == 510
+    assert by_pos[(100, 100)] == 520
+    assert by_pos[(0, 100)] == 530
+
+
+def test_positions_scan_rejects_focus_z_length_mismatch(tmp_path: Path) -> None:
+    scope = FakeMicroscope()
+    with pytest.raises(AcquisitionError, match="focus_z has"):
+        fetch_tiles_at_positions(
+            client=scope, out_dir=tmp_path, positions=[(0, 0), (10, 0)],
+            rows=1, cols=2, focus_z=[100],
         )
