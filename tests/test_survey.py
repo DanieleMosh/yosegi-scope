@@ -13,10 +13,12 @@ import pytest
 
 from yosegi.survey import (
     BBox,
+    EdgeTouch,
     Region,
     ScanPlan,
     SurveyError,
     TissueMask,
+    bbox_touches_edges,
     detect_sample_bbox,
     detect_sample_regions,
     plan_survey,
@@ -132,6 +134,32 @@ def test_bbox_properties() -> None:
     b = BBox(x0=10, y0=20, x1=110, y1=80)
     assert b.width == 100 and b.height == 60 and not b.is_empty
     assert BBox(0, 0, 0, 10).is_empty
+
+
+# --- bbox_touches_edges (auto-expand support) -------------------------------
+
+
+def test_bbox_touches_no_edges_when_centred() -> None:
+    # 40x40 bbox centred in a 200x200 canvas -> touches nothing.
+    t = bbox_touches_edges(BBox(80, 80, 120, 120), (200, 200), margin=20)
+    assert isinstance(t, EdgeTouch)
+    assert not t.any
+    assert not (t.left or t.top or t.right or t.bottom)
+
+
+def test_bbox_touches_each_edge() -> None:
+    # canvas 200x200 (h, w). Tissue against the left+top corner.
+    t = bbox_touches_edges(BBox(0, 0, 50, 50), (200, 200), margin=20)
+    assert t.left and t.top and not t.right and not t.bottom and t.any
+    # Against the right+bottom corner.
+    t2 = bbox_touches_edges(BBox(150, 150, 200, 200), (200, 200), margin=20)
+    assert t2.right and t2.bottom and not t2.left and not t2.top
+
+
+def test_bbox_touches_respects_margin() -> None:
+    # bbox 15px from the left edge: touched at margin=20, not at margin=10.
+    assert bbox_touches_edges(BBox(15, 80, 120, 120), (200, 200), margin=20).left
+    assert not bbox_touches_edges(BBox(15, 80, 120, 120), (200, 200), margin=10).left
 
 
 # --- plan_tile_grid ---------------------------------------------------------

@@ -103,6 +103,10 @@ uv run yosegi run --auto --host microscope.local --output mosaic.jpg --max-regio
 
 # Use a per-region focus map instead of autofocusing at every tile (tilted slides)
 uv run yosegi run --auto --host microscope.local --output mosaic.jpg --focus-map
+
+# Grow the overview until the whole sample is enclosed (samples larger than the
+# initial overview are otherwise clipped)
+uv run yosegi run --auto --host microscope.local --output mosaic.jpg --auto-expand
 ```
 
 With `--auto`, the coarse overview lands in `mosaic_overview/` (+ a stitched
@@ -110,6 +114,12 @@ With `--auto`, the coarse overview lands in `mosaic_overview/` (+ a stitched
 `mosaic_tiles/` — a sparse, densely-renumbered set, fewer than a full grid when
 the tissue is patchy. `--min-area-frac` sets the smallest region (as a fraction
 of the overview) that counts as tissue rather than a speck.
+
+The overview is a **fixed window** by default: if your sample is larger than it,
+the sample is clipped to that window. Pass `--auto-expand` to grow the overview
+outward (up to `--max-expansions` rounds) whenever detected tissue reaches an
+overview edge, so the whole sample is enclosed before the high-res scan — the
+right choice when you don't know the sample's size in advance.
 
 If `--host` is omitted, the microscope is discovered automatically via mDNS.
 

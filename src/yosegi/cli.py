@@ -169,6 +169,19 @@ def run(
         help="Cap the number of tissue regions surveyed, largest first (--auto only). "
              "Default: survey every detected region.",
     ),
+    auto_expand: bool = typer.Option(
+        False,
+        "--auto-expand",
+        help="Grow the overview outward until the sample is fully enclosed (--auto only): "
+             "if detected tissue reaches an overview edge, extend the overview there and "
+             "re-detect, so a sample larger than the initial overview is not clipped.",
+    ),
+    max_expansions: int = typer.Option(
+        4,
+        "--max-expansions",
+        min=0,
+        help="Max overview growth rounds when --auto-expand is on (--auto only).",
+    ),
     autofocus: bool = typer.Option(
         True, "--autofocus/--no-autofocus", help="Autofocus at each tile before capture."
     ),
@@ -238,6 +251,8 @@ def run(
                 max_regions=max_regions,
                 focus_map=focus_map,
                 focus_points_per_region=focus_points_per_region,
+                auto_expand=auto_expand,
+                max_expansions=max_expansions,
             )
         else:
             tile_dir = output.parent / f"{output.stem}_tiles"

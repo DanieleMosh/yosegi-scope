@@ -94,6 +94,42 @@ class BBox:
 
 
 @dataclass(frozen=True)
+class EdgeTouch:
+    """Which edges of an overview canvas the detected tissue reaches.
+
+    ``True`` on a side means the tissue bbox comes within ``margin`` pixels of
+    that canvas edge -- a sign the sample continues past the overview and the
+    overview must grow in that direction to enclose it. ``any`` is ``True`` if
+    any side is touched (the sample is clipped).
+    """
+
+    left: bool
+    top: bool
+    right: bool
+    bottom: bool
+
+    @property
+    def any(self) -> bool:
+        return self.left or self.top or self.right or self.bottom
+
+
+def bbox_touches_edges(bbox: BBox, canvas_shape: tuple[int, int], *, margin: int = 20) -> EdgeTouch:
+    """Report which edges of a ``(height, width)`` canvas ``bbox`` reaches.
+
+    Used to decide whether an overview fully encloses the sample: if the detected
+    tissue bbox is within ``margin`` px of a canvas edge, the sample is (likely)
+    clipped on that side and the overview should be extended there.
+    """
+    h, w = canvas_shape
+    return EdgeTouch(
+        left=bbox.x0 <= margin,
+        top=bbox.y0 <= margin,
+        right=bbox.x1 >= w - margin,
+        bottom=bbox.y1 >= h - margin,
+    )
+
+
+@dataclass(frozen=True)
 class Region:
     """One detected tissue region in an overview image.
 
@@ -675,6 +711,9 @@ def run_auto_survey(
     max_regions: int | None = None,
     focus_map: bool = False,
     focus_points_per_region: int = 5,
+    auto_expand: bool = False,
+    max_expansions: int = 4,
+    expand_increment: int = 2,
 ) -> MosaicResult:
     """End-to-end automatic whole-slide survey, driven by an already-connected scope.
 
@@ -683,7 +722,12 @@ def run_auto_survey(
     1. **Overview pass** -- coarse snake raster (``overview_rows`` x
        ``overview_cols``, ``overview_step_x``/``overview_step_y`` apart) into
        ``{out_file.stem}_overview/``. Same magnification as the high-res scan;
-       only the step size is bigger.
+       only the step size is bigger. With ``auto_expand``, this repeats: if the
+       detected tissue touches an overview edge (the sample is clipped), the
+       overview grows outward around its centre and re-runs, up to
+       ``max_expansions`` times (adding ``expand_increment`` rows/cols per touched
+       side each round), so an arbitrarily large sample is fully enclosed before
+       the high-res scan. The scope is re-centred each round for symmetric growth.
     2. **Overview stitch** -- paste the overview tiles by stage + CSM into a
        single canvas (``{out_file.stem}_overview.jpg``). No correlation -- the
        overview only needs to be good enough for segmentation.
@@ -715,47 +759,87 @@ def run_auto_survey(
     overview_image_path = parent / f"{stem}_overview.jpg"
     tiles_dir = parent / f"{stem}_tiles"
 
-    # Stage 1: overview raster (uses the scope's CSM, calibrating if needed).
-    overview_tiles = fetch_tiles(
-        host=None,
-        out_dir=overview_dir,
-        rows=overview_rows,
-        cols=overview_cols,
-        step_x=overview_step_x,
-        step_y=overview_step_y,
-        autofocus=autofocus,
-        autofocus_once=autofocus_once,
-        overlap=overlap,
-        calibrate=True,
-        client=client,
-    )
-    if not overview_tiles:
-        raise AcquisitionError("overview pass produced no tiles")
+    # Stages 1-3: overview raster -> stitch -> detect. With ``auto_expand`` this
+    # loops: if the detected tissue touches an overview edge (the sample is
+    # clipped), the overview grows outward around the same centre and re-runs,
+    # until the tissue is enclosed by empty slide or ``max_expansions`` is hit.
+    rows, cols = overview_rows, overview_cols
+    # Anchor the growth on the centre of the initial overview so expansion is
+    # symmetric. fetch_tiles rasters +x/+y from the scope's current position, so
+    # the first overview's centre is start + ((cols-1)/2 * step, (rows-1)/2 * step).
+    start = dict(client.position)
+    center_x = start["x"] + (cols - 1) * overview_step_x // 2
+    center_y = start["y"] + (rows - 1) * overview_step_y // 2
 
-    # Pull the CSM that ``acquire`` just embedded. Read it from the manifest
-    # ``fetch_tiles`` wrote (same matrix the stitcher will see); guard the read
-    # so a missing/corrupt manifest surfaces as a SurveyError, not a raw
-    # traceback that escapes the CLI's error normalisation.
-    csm = _csm_from_manifest(overview_dir / "manifest.json")
-    if csm is None:
-        raise SurveyError(
-            "scope has no camera-stage-mapping calibration; run calibrate_xy() on the "
-            "scope or use fetch_tiles with calibrate=True before surveying"
+    tissue = None
+    overview_tiles = []
+    csm = None
+    overview_image = None
+    overview_origin_stage = (0, 0)
+    attempts = max_expansions + 1 if auto_expand else 1
+    for attempt in range(attempts):
+        # Re-centre the stage to the bottom-left corner of the target window so a
+        # grown overview expands evenly in all directions rather than only +x/+y.
+        corner_x = center_x - (cols - 1) * overview_step_x // 2
+        corner_y = center_y - (rows - 1) * overview_step_y // 2
+        client.move({"x": int(corner_x), "y": int(corner_y), "z": start["z"]}, absolute=True)
+
+        overview_tiles = fetch_tiles(
+            host=None,
+            out_dir=overview_dir,
+            rows=rows,
+            cols=cols,
+            step_x=overview_step_x,
+            step_y=overview_step_y,
+            autofocus=autofocus,
+            autofocus_once=autofocus_once,
+            overlap=overlap,
+            calibrate=True,
+            client=client,
+        )
+        if not overview_tiles:
+            raise AcquisitionError("overview pass produced no tiles")
+
+        csm = _csm_from_manifest(overview_dir / "manifest.json")
+        if csm is None:
+            raise SurveyError(
+                "scope has no camera-stage-mapping calibration; run calibrate_xy() on the "
+                "scope or use fetch_tiles with calibrate=True before surveying"
+            )
+
+        # Stitch the overview by stage + CSM into one canvas ourselves so we
+        # control the pixel-to-stage origin exactly (pixel (0,0) == origin stage);
+        # detection runs on the in-memory canvas so JPEG can't perturb the
+        # (0,0,0) canvas-gap convention.
+        overview_image, overview_origin_stage = _stitch_overview_by_stage(overview_tiles, csm)
+        overview_image.save(overview_image_path, "JPEG", quality=85)
+
+        tissue = detect_sample_regions(
+            overview_image, min_area_frac=min_area_frac, max_regions=max_regions
         )
 
-    # Stage 2: stitch the overview by stage + CSM into one canvas. We do this
-    # ourselves rather than via openflexure-stitching so we control the
-    # pixel-to-stage origin exactly: pixel (0, 0) == (overview_origin_x_stage,
-    # overview_origin_y_stage). That anchor is what plan_survey needs. Detection
-    # runs on the in-memory canvas (not the re-read JPEG) so JPEG compression
-    # can't perturb the exact (0,0,0) canvas-gap convention.
-    overview_image, overview_origin_stage = _stitch_overview_by_stage(overview_tiles, csm)
-    overview_image.save(overview_image_path, "JPEG", quality=85)
+        if not auto_expand:
+            break
+        touch = bbox_touches_edges(tissue.bbox, overview_image.size[::-1])
+        if not touch.any or attempt == attempts - 1:
+            # Enclosed, or out of expansion budget: proceed with what we have.
+            break
+        # Grow the overview toward each touched side and re-detect. Adding cols on
+        # one side only (e.g. right) also shifts the window's centre that way by
+        # half the added span, so the overview marches toward the uncovered part
+        # of the sample rather than growing symmetrically around a fixed centre
+        # (which never reaches a sample offset to one side).
+        add_cols = expand_increment * (int(touch.left) + int(touch.right))
+        add_rows = expand_increment * (int(touch.top) + int(touch.bottom))
+        # Net one-sided shift in cols/rows: +right grows +x, +left grows -x.
+        center_x += (int(touch.right) - int(touch.left)) * expand_increment * overview_step_x // 2
+        center_y += (int(touch.bottom) - int(touch.top)) * expand_increment * overview_step_y // 2
+        cols += add_cols
+        rows += add_rows
 
-    # Stage 3: detect every tissue region on the overview.
-    tissue = detect_sample_regions(
-        overview_image, min_area_frac=min_area_frac, max_regions=max_regions
-    )
+    # The loop always runs at least once, so these are set; assert for clarity.
+    if tissue is None or csm is None:
+        raise SurveyError("overview/detection loop produced no result")
 
     # Stage 4: plan the tissue-gated high-res scan. tile_size_px is the working
     # frame size, which equals the overview tile size since we did not change
@@ -875,11 +959,13 @@ def _stitch_overview_by_stage(
 
 __all__ = [
     "BBox",
+    "EdgeTouch",
     "Region",
     "ScanPlan",
     "SurveyError",
     "TissueMask",
     "apply_focus_map",
+    "bbox_touches_edges",
     "detect_sample_bbox",
     "detect_sample_regions",
     "plan_survey",
