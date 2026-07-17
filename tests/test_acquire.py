@@ -225,6 +225,7 @@ def test_positions_scan_writes_manifest(tmp_path: Path) -> None:
     assert manifest["grid"] == {"rows": 1, "cols": 2}
     assert manifest["planned_positions"] == [[10, 20], [30, 20]]
     assert manifest["camera_stage_mapping"] == _CSM
+    assert manifest["focus_map"] is False  # no focus map supplied
     assert len(manifest["tiles"]) == 2
 
 
@@ -248,6 +249,10 @@ def test_positions_scan_focus_z_sets_z_and_skips_autofocus(tmp_path: Path) -> No
     )
     # focus_z takes precedence over autofocus -> no autofocus calls.
     assert scope.autofocus_calls == 0
+    # Manifest records that focus came from a map, not per-tile autofocus.
+    manifest = json.loads((tmp_path / "manifest.json").read_text())
+    assert manifest["focus_map"] is True
+    assert manifest["autofocus"] is False
     by_pos = {(t.stage_x, t.stage_y): t.stage_z for t in tiles}
     assert by_pos[(0, 0)] == 500
     assert by_pos[(100, 0)] == 510

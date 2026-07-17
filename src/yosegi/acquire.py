@@ -260,7 +260,14 @@ def fetch_tiles_at_positions(
         autofocus=autofocus, autofocus_once=autofocus_once, csm=csm, focus_z=focus_z,
     )
     client.move(start, absolute=True)
-    _write_positions_manifest(out_dir, rows, cols, positions, autofocus, start, csm, tiles)
+    # Record what actually drove focus: a supplied focus map takes precedence, so
+    # no per-tile autofocus ran in that case.
+    used_focus_map = focus_z is not None
+    _write_positions_manifest(
+        out_dir, rows, cols, positions,
+        autofocus=autofocus and not used_focus_map,
+        focus_map=used_focus_map, start=start, csm=csm, tiles=tiles,
+    )
     return tiles
 
 
@@ -355,7 +362,9 @@ def _write_positions_manifest(
     rows: int,
     cols: int,
     positions: list[tuple[int, int]],
+    *,
     autofocus: bool,
+    focus_map: bool,
     start: dict[str, int],
     csm: list[list[float]] | None,
     tiles: list[Tile],
@@ -366,6 +375,8 @@ def _write_positions_manifest(
     can read the CSM from it, but records the planned ``grid`` extent and the
     absolute target positions instead of a fixed step, since a planned scan may be
     sparse (fewer tiles than ``rows * cols`` once empty tiles are skipped).
+    ``autofocus`` reflects whether per-tile autofocus actually ran; ``focus_map``
+    records whether tile Z came from a precomputed focus surface.
     """
     manifest = {
         "schema": "yosegi.acquire/1",
@@ -373,6 +384,7 @@ def _write_positions_manifest(
         "grid": {"rows": rows, "cols": cols},
         "planned_positions": [[int(x), int(y)] for x, y in positions],
         "autofocus": autofocus,
+        "focus_map": focus_map,
         "camera_stage_mapping": csm,
         "start_position": start,
         "tiles": [_tile_record(t) for t in tiles],

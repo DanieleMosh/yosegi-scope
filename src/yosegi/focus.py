@@ -101,6 +101,10 @@ def build_focus_map(
     if not points:
         raise FocusError("focus map needs at least one sample point")
 
+    # Each point autofocuses from the same base Z (``z0``) rather than seeding
+    # from the previous point's focus. That costs a slightly wider sweep per
+    # point, but keeps samples independent (a bad focus at one point can't bias
+    # the next) -- the right trade-off when only a handful of points feed a plane.
     start = dict(scope.position)
     z0 = int(start.get("z", 0))
     samples: list[tuple[int, int, int]] = []

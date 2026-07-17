@@ -224,6 +224,7 @@ def test_run_auto_survey_focus_map_replaces_per_tile_autofocus(tmp_path: Path) -
     import json
 
     manifest = json.loads((tmp_path / "mosaic_tiles" / "manifest.json").read_text())
+    assert manifest["focus_map"] is True and manifest["autofocus"] is False
     zs = [t["stage_z"] for t in manifest["tiles"]]
     assert all(z is not None and z > 100 for z in zs)
     assert len(set(zs)) > 1  # the plane tilts, so tile Z varies across the scan
