@@ -828,7 +828,12 @@ def run_auto_survey(
         # one side only (e.g. right) also shifts the window's centre that way by
         # half the added span, so the overview marches toward the uncovered part
         # of the sample rather than growing symmetrically around a fixed centre
-        # (which never reaches a sample offset to one side).
+        # (which never reaches a sample offset to one side). One touched side
+        # extends by ~expand_increment * step per round, so the reach across
+        # ``max_expansions`` rounds is ~max_expansions * expand_increment * step.
+        # Keep ``expand_increment`` even: the centre shift below floor-divides by
+        # 2 independently of the corner's, so an odd increment drifts the pinned
+        # edge by up to ~increment/2 steps per round (exact when even).
         add_cols = expand_increment * (int(touch.left) + int(touch.right))
         add_rows = expand_increment * (int(touch.top) + int(touch.bottom))
         # Net one-sided shift in cols/rows: +right grows +x, +left grows -x.

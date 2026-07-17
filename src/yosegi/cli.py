@@ -180,7 +180,9 @@ def run(
         4,
         "--max-expansions",
         min=0,
-        help="Max overview growth rounds when --auto-expand is on (--auto only).",
+        help="Max overview growth rounds when --auto-expand is on (--auto only). Reach past "
+             "the initial overview is roughly max-expansions x 2 x overview-step per side; "
+             "raise it for a very large sample.",
     ),
     autofocus: bool = typer.Option(
         True, "--autofocus/--no-autofocus", help="Autofocus at each tile before capture."
