@@ -111,11 +111,21 @@ default 5×5 at 2500-step spacing) → `survey.detect_sample_regions` on the
 stitched overview (all tissue regions, `--max-regions` to cap) →
 `survey.plan_survey` (a **tissue-gated** grid — tiles whose centre misses the
 tissue are skipped, so empty slide between sections is not scanned) → high-res
-scan of the planned positions → final stitch. With `--auto`,
+scan of the planned positions → final stitch. `--focus-map` builds a per-region
+Z surface instead of per-tile autofocus. With `--auto`,
 `--rows`/`--cols`/`--step-x`/`--step-y` are ignored. Overview tiles and the
 intermediate overview JPEG land in `{out_stem}_overview/` and
 `{out_stem}_overview.jpg`; high-res tiles in `{out_stem}_tiles/` (a sparse,
 densely-renumbered set — fewer than a full grid when tissue is patchy).
+
+The overview is a **fixed window** by default, so a sample larger than it is
+clipped to that window. `--auto-expand` grows the overview outward (re-centring
+toward whichever edge the tissue reaches, up to `--max-expansions` rounds) until
+the sample is enclosed by empty slide — a true whole-slide survey for a sample of
+unknown size. `survey.bbox_touches_edges` is the edge-clip check that drives it.
+Verified on the real scope via `scripts/e2e_scope.py`: a stained plant-stem
+sample overflowed even a 16000-step fixed overview, which is exactly the case
+`--auto-expand` handles.
 
 The default overview step (2500 stage steps) sits just below the tile's
 stage span on a 40x OpenFlexure (~2750 × ~3636 — see [Capture stats](#capture-stats))

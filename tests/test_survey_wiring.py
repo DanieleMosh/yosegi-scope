@@ -231,6 +231,49 @@ def test_run_auto_survey_focus_map_replaces_per_tile_autofocus(tmp_path: Path) -
 
 
 @requires_ofs
+def test_run_auto_survey_auto_expand_encloses_a_clipped_sample(tmp_path: Path) -> None:
+    """A sample larger than the initial overview must trigger overview growth.
+
+    The sample spans a stage box far wider than a 3x3 overview at step 40 covers,
+    so the first overview clips it (tissue touches every edge). With auto_expand
+    the overview grows outward and re-detects until the tissue is enclosed -- so
+    the final overview canvas and total overview captures both exceed the initial
+    3x3 grid, and the sample is no longer edge-clipped.
+    """
+    from PIL import Image
+
+    from yosegi.survey import bbox_touches_edges, detect_sample_regions
+
+    out = tmp_path / "mosaic.jpg"
+    # Sample much larger than a 3x3@40 overview (which covers ~120x120 steps).
+    scope = _Scope(sample_x_range=(-30, 500), sample_y_range=(-30, 500), tile_size=(60, 60))
+    run_auto_survey(
+        client=scope,
+        out_file=out,
+        overview_rows=3,
+        overview_cols=3,
+        overview_step_x=40,
+        overview_step_y=40,
+        overlap=0.2,
+        autofocus=False,
+        correlate=False,
+        min_area_frac=0.002,
+        auto_expand=True,
+        max_expansions=6,
+        expand_increment=2,
+    )
+    # The overview grew: total overview captures exceed the initial 3*3 = 9.
+    # (Each expansion re-rasters a larger grid, so captures accumulate well past 9.)
+    assert scope.captures > 9
+    # The final overview no longer clips the sample on all sides.
+    with Image.open(tmp_path / "mosaic_overview.jpg") as ov:
+        arr = np.asarray(ov.convert("RGB"))
+    tissue = detect_sample_regions(arr, min_area_frac=0.002)
+    touch = bbox_touches_edges(tissue.bbox, arr.shape[:2])
+    assert not touch.any, f"sample still clipped after auto-expand: {touch}"
+
+
+@requires_ofs
 def test_run_auto_survey_full_pipeline(tmp_path: Path) -> None:
     out = tmp_path / "mosaic.jpg"
     # Make the sample large enough that the detected bbox is at least 2x2 tiles,
